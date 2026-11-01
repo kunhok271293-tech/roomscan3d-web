@@ -47,6 +47,15 @@
   #toast { display:none; position:absolute; left:10px; right:10px; top:60px; z-index:7; background:rgba(20,20,20,.92); color:#fff;
     border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:13px; pointer-events:none; }
   #toast.bad { border-color:#ff2d20; color:#ff8a80; }
+  #featDlg { display:none; position:absolute; top:70px; left:50%; transform:translateX(-50%); z-index:5; background:var(--panel);
+    border:1px solid #00b0ff; border-radius:8px; padding:14px; width:min(340px, 92vw); box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  #featDlg select, #featDlg input { width:100%; font:600 17px system-ui; padding:8px; margin:6px 0; background:#15171a; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; }
+  #featDlg .two { display:flex; align-items:center; gap:8px; }
+  #featDlg .two input { flex:1; min-width:0; text-align:center; }
+  #featDlg .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  .dim-label.feat { background:rgba(20,20,20,.9); }
+  .subhead { margin:10px 6px 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
   #loupe { display:none; position:absolute; top:66px; width:130px; height:130px; border-radius:50%; border:2px solid #fff;
     box-shadow:0 4px 16px rgba(0,0,0,.6); z-index:6; pointer-events:none; background:#111; }
   #bottom { display:none; }
@@ -80,6 +89,7 @@
     <div id="toolbar">
       <label class="btn">Mở file 3D<input id="file" type="file" accept=".obj,.glb,.gltf,.usdz,.ply,.stl" hidden></label>
       <button id="bMeasure" class="on" title="Phím M">📏 Đo</button>
+      <button id="bFeat" title="Ghi nhận ổ điện, ô gió… lên mô hình">▣ Chi tiết</button>
       <button id="bSnap" class="on" title="Phím S">🧲 Bám điểm</button>
       <select id="axis" title="Khoá trục (A/X/Y/Z)">
         <option value="auto">Trục: tự do</option><option value="x">Khoá X</option>
@@ -92,9 +102,10 @@
     <div id="hint">Bấm 2 điểm → nhập số đo thật (thước/laser) → nhãn dim hiện số thật. Bám điểm tự hút vào đỉnh/cạnh. Esc: huỷ · Ctrl+Z: hoàn tác · A/X/Y/Z: khoá trục</div>
     <div id="bottom">
       <button id="bUndo" title="Hoàn tác">↶</button>
-      <button id="bUnit" title="Đổi đơn vị: cm → mm → m">Đơn vị: cm</button>
+      <button id="bUnit" title="Đổi đơn vị: cm → mm → m">cm ⇅</button>
       <button id="bTool" class="on">📏 Đo</button>
-      <button id="bList">☰ Danh sách (<span id="count2">0</span>)</button>
+      <button id="bFeatB" title="Ghi nhận ổ điện, ô gió… lên mô hình">▣</button>
+      <button id="bList" title="Danh sách số đo">☰ <span id="count2">0</span></button>
     </div>
     <div id="ask">
       <div><b>Nhập số đo thật</b> (đơn vị mặc định: <span id="askUnit"></span>)</div>
@@ -106,7 +117,23 @@
         <button id="askCancel">Huỷ</button>
       </div>
     </div>
-    <canvas id="loupe" width="260" height="260"></canvas>
+    <div id="featDlg">
+      <div><b>Ghi nhận chi tiết nhỏ</b> (ổ điện, công tắc, ô gió…)</div>
+      <select id="fType">
+        <option value="outlet">Ổ điện</option>
+        <option value="switch">Công tắc</option>
+        <option value="vent">Ô gió / quạt hút</option>
+        <option value="other">Chi tiết khác</option>
+      </select>
+      <div class="two"><input id="fW" inputmode="decimal" placeholder="Rộng"> <span>×</span> <input id="fH" inputmode="decimal" placeholder="Cao"> <span>mm</span></div>
+      <input id="fNote" placeholder="Ghi chú (vd: cách sàn 300, sát góc trái)" autocomplete="off">
+      <div class="btns">
+        <button id="fOk" class="on">Ghi</button>
+        <button id="fDel">Xoá</button>
+        <button id="fCancel">Huỷ</button>
+      </div>
+    </div>
+    <canvas id="loupe" width="260" height="260" style="display:none"></canvas>
     <div id="toast"></div>
     <div id="drop">Thả file .obj / .usdz / .glb / .ply / .stl vào đây</div>
   </div>
@@ -193,7 +220,7 @@ let wire = false;
 
 function setModel(obj) {
   modelGroup.clear();
-  clearDims(false);
+  clearDims(false); clearFeatures(false);
   let sc = 1;
   try { sc = parseFloat(localStorage.getItem('scale:' + currentName)) || 1; } catch {}
   modelGroup.scale.setScalar(sc);
@@ -386,12 +413,21 @@ function featureSnap(hit) {
 function pick(ev) {
   const r = renderer.domElement.getBoundingClientRect();
   const mx = ev.clientX - r.left, my = ev.clientY - r.top;
+  // bám vào tâm/góc của chi tiết đã ghi nhận (ổ điện, ô gió…) để đo khoảng cách tới chúng
+  if (snapOn && features.length) {
+    const m = new THREE.Vector2(mx, my), R = matchMedia('(pointer:coarse)').matches ? 18 : 12;
+    let best = R, bf = null, bp = null;
+    for (const f of features) for (const q of f.pts) { const d = toScreen(q).distanceTo(m); if (d < best) { best = d; bf = f; bp = q; } }
+    if (bp) return { p: bp.clone(), kind: 'vertex', n: bf.n.clone() };
+  }
   ndc.set(mx / r.width * 2 - 1, -(my / r.height) * 2 + 1);
   raycaster.setFromCamera(ndc, camera);
   const hit = raycaster.intersectObjects(modelGroup.children, true).find(h => h.face);
   if (!hit) return null;
+  const nrm = hit.face.normal.clone().transformDirection(hit.object.matrixWorld);   // pháp tuyến mặt, hướng về phía camera
+  if (nrm.dot(raycaster.ray.direction) > 0) nrm.negate();
   let p = hit.point.clone(), kind = 'face';
-  if (snapOn) { const f = featureSnap(hit); if (f) return f; }
+  if (snapOn) { const f = featureSnap(hit); if (f) { f.n = nrm; return f; } }
   // Lưới LiDAR thô (hàng trăm nghìn tam giác): chỉ bám góc/cạnh bằng mặt phẳng ở trên; lưới sạch mới bám đỉnh tam giác
   const geoOf = hit.object.geometry;
   if (snapOn && (geoOf.index ? geoOf.index.count : geoOf.attributes.position.count) / 3 < 20000) {
@@ -416,7 +452,7 @@ function pick(ev) {
       if (ep) { p = ep; kind = 'edge'; }
     }
   }
-  return { p, kind };
+  return { p, kind, n: nrm };
 }
 
 function applyLock(p) {
@@ -498,7 +534,7 @@ function syncFirstMarker() {
 }
 
 view.addEventListener('pointerdown', ev => {
-  if (!touchMode || ev.pointerType === 'mouse' || ev.target.closest('#toolbar,#bottom,#ask,#side')) return;
+  if (!touchMode || ev.pointerType === 'mouse' || ev.target.closest('#toolbar,#bottom,#ask,#featDlg,#side')) return;
   pts.add(ev.pointerId);
   if (pts.size > 1) { g = null; hideLive(); hideLoupe(); cursor.visible = false; return; }   // hai ngón = di chuyển/zoom
   if (!measureOn || askCtx) return;
@@ -514,6 +550,7 @@ function endTouch(ev) {
   if (ev.type === 'pointercancel') { hideLive(); return; }
   const h = pick(off(ev));
   if (!h) { hideLive(); return; }
+  if (featureMode) { hideLive(); askFeature({ c: h.p, n: h.n }); return; }
   const p = applyLock(h.p);
   if (!first) { first = p.clone(); hideLive(); return; }
   const a = first; first = null; hideLive();
@@ -526,7 +563,7 @@ let down = null;
 view.addEventListener('pointerdown', ev => { down = { x: ev.clientX, y: ev.clientY }; });
 view.addEventListener('pointerup', ev => {
   if (touchMode) { down = null; return; }
-  if (!down || !measureOn || askCtx || ev.target.closest('#toolbar') || ev.target.closest('#ask')) { down = null; return; }
+  if (!down || !measureOn || askCtx || ev.target.closest('#toolbar') || ev.target.closest('#ask') || ev.target.closest('#featDlg')) { down = null; return; }
   const moved = Math.hypot(ev.clientX - down.x, ev.clientY - down.y); down = null;
   if (moved > 5) return;
   placeAt(ev);
@@ -534,6 +571,7 @@ view.addEventListener('pointerup', ev => {
 function placeAt(ev) {
   if (!measureOn || askCtx) return;
   const h = pick(ev); if (!h) return;
+  if (featureMode) { askFeature({ c: h.p, n: h.n }); return; }
   const p = applyLock(h.p);
   if (!first) { first = p.clone(); }
   else {
@@ -546,10 +584,10 @@ $('bUndo').onclick = () => { if (first) { first = null; liveLine.visible = liveL
 
 // ---------- nhập số đo thật ----------
 let askCtx = null;
-function parseLen(s) {
+function parseLen(s, def = unit) {
   const m = s.trim().replace(',', '.').match(/^([\d.]+)\s*(mm|cm|m)?$/i);
   if (!m) return NaN;
-  const v = parseFloat(m[1]), u = (m[2] || unit).toLowerCase();
+  const v = parseFloat(m[1]), u = (m[2] || def).toLowerCase();
   return u === 'mm' ? v / 1000 : u === 'cm' ? v / 100 : v;
 }
 function ask(a, b, idx = null) {
@@ -588,10 +626,12 @@ function calibrate(i) {
   if (!isFinite(k) || Math.abs(k - 1) < 1e-6) return;
   if (!confirm(`Chỉnh tỉ lệ cả mô hình ×${k.toFixed(4)} theo số đo này?\nCác số đo thật đã nhập giữ nguyên.`)) return;
   const saved = dims.map(x => ({ a: x.a.clone().multiplyScalar(k), b: x.b.clone().multiplyScalar(k), real: x.real }));
-  clearDims(false);
+  const savedF = features.map(f => ({ type: f.type, w: f.w, h: f.h, c: f.c.clone().multiplyScalar(k), n: f.n.clone(), note: f.note }));
+  clearDims(false); clearFeatures(false);
   modelGroup.scale.multiplyScalar(k);
   modelGroup.updateMatrixWorld(true);
   saved.forEach(s => addDim(s.a, s.b, s.real, false));
+  savedF.forEach(f => addFeature(f, false));
   fit();
   try { localStorage.setItem('scale:' + currentName, String(modelGroup.scale.x)); } catch {}
   refresh(true);
@@ -626,6 +666,99 @@ function clearDims(save = true) {
   refresh(save);
 }
 
+// ---------- chi tiết nhỏ: ổ điện, công tắc, ô gió… ----------
+// LiDAR không quét được các chi tiết này, nên ta đặt khung đúng kích thước thật lên tường rồi đo khoảng cách tới chúng.
+const FEAT_TYPES = {
+  outlet: { name: 'Ổ điện', w: 0.086, h: 0.086, color: 0x00b0ff },
+  switch: { name: 'Công tắc', w: 0.086, h: 0.086, color: 0xb388ff },
+  vent:   { name: 'Ô gió', w: 0.3, h: 0.15, color: 0x00e676 },
+  other:  { name: 'Chi tiết', w: 0.1, h: 0.1, color: 0xffd600 },
+};
+const hex = c => '#' + c.toString(16).padStart(6, '0');
+const mm = v => String(Math.round(v * 1000));
+const featGroup = new THREE.Group(); scene.add(featGroup);
+let features = [], featureMode = false, featCtx = null;
+
+function featBasis(n) {
+  const N = n.clone().normalize();
+  let up = Math.abs(N.y) > 0.9 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(0, 1, 0);
+  up.addScaledVector(N, -up.dot(N)).normalize();
+  return { N, up, right: new THREE.Vector3().crossVectors(up, N).normalize() };
+}
+function addFeature(f, save = true) {
+  const t = FEAT_TYPES[f.type] || FEAT_TYPES.other;
+  const { N, up, right } = featBasis(f.n);
+  const group = new THREE.Group();
+  const plane = new THREE.Mesh(new THREE.PlaneGeometry(f.w, f.h), new THREE.MeshBasicMaterial({ color: t.color, transparent: true,
+    opacity: 0.5, side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: -2, polygonOffsetUnits: -2 }));
+  plane.quaternion.setFromRotationMatrix(new THREE.Matrix4().makeBasis(right, up, N));
+  plane.position.copy(f.c).addScaledVector(N, 0.002);
+  const hw = f.w / 2, hh = f.h / 2;
+  const corners = [[-hw, -hh], [hw, -hh], [hw, hh], [-hw, hh]].map(([x, y]) =>
+    f.c.clone().addScaledVector(right, x).addScaledVector(up, y).addScaledVector(N, 0.003));
+  const outline = new THREE.LineLoop(new THREE.BufferGeometry().setFromPoints(corners), new THREE.LineBasicMaterial({ color: t.color }));
+  group.add(plane, outline);
+  const el = document.createElement('div'); el.className = 'dim-label feat';
+  el.style.color = el.style.borderColor = hex(t.color);
+  const label = new CSS2DObject(el); label.position.copy(f.c).addScaledVector(N, 0.004); group.add(label);
+  featGroup.add(group);
+  features.push({ type: f.type, w: f.w, h: f.h, note: f.note || '', c: f.c.clone(), n: N, group, el, pts: [f.c.clone(), ...corners] });
+  refresh(save);
+}
+function disposeFeature(f) { featGroup.remove(f.group); f.el.remove(); f.group.traverse(o => { if (o.geometry) o.geometry.dispose(); }); }
+function removeFeature(i, silent = false) {
+  const f = features[i];
+  if (!silent && !confirm('Xoá chi tiết "' + (FEAT_TYPES[f.type] || FEAT_TYPES.other).name + ' ' + mm(f.w) + '×' + mm(f.h) + '"?')) return;
+  features.splice(i, 1); disposeFeature(f); refresh(true);
+}
+function clearFeatures(save = true) {
+  while (features.length) disposeFeature(features.pop());
+  refresh(save);
+}
+const featSpec = f => ({ type: f.type, w: f.w, h: f.h, c: f.c.toArray(), n: f.n.toArray(), note: f.note || '' });
+const featFromSpec = s => ({ type: s.type, w: s.w, h: s.h, c: new THREE.Vector3(...s.c), n: new THREE.Vector3(...s.n), note: s.note || '' });
+
+function setFeatureMode(on) {
+  featureMode = on;
+  setToggle($('bFeat'), on); setToggle($('bFeatB'), on);
+  if (on) {
+    if (!measureOn) setMeasure(true);
+    first = null; hideLive();
+    toast('Chọn vị trí chi tiết (ổ điện, ô gió…) trên mô hình' + (touchMode ? ': giữ ngón tay để ngắm, thả tay để chốt.' : '.'));
+  }
+}
+function askFeature(ctx, idx = null) {
+  const f = idx != null ? features[idx] : null;
+  featCtx = { ctx, idx };
+  askCtx = { feat: true };            // chặn thao tác đo trong lúc hộp thoại mở
+  $('fType').value = f ? f.type : 'outlet';
+  const d = FEAT_TYPES[$('fType').value];
+  $('fW').value = mm(f ? f.w : d.w); $('fH').value = mm(f ? f.h : d.h);
+  $('fNote').value = f ? f.note : '';
+  $('fDel').style.display = f ? '' : 'none';
+  $('featDlg').style.display = 'block';
+  setTimeout(() => $('fW').focus(), 0);
+}
+function closeFeat() { $('featDlg').style.display = 'none'; featCtx = null; askCtx = null; }
+function commitFeat() {
+  const w = parseLen($('fW').value, 'mm'), h = parseLen($('fH').value, 'mm');
+  if (!(w > 0)) { $('fW').focus(); return; }
+  if (!(h > 0)) { $('fH').focus(); return; }
+  const { ctx, idx } = featCtx, type = $('fType').value, note = $('fNote').value.trim();
+  if (idx == null) addFeature({ type, w, h, c: ctx.c.clone(), n: ctx.n, note });
+  else { const o = features[idx]; const spec = { type, w, h, c: o.c.clone(), n: o.n.clone(), note }; removeFeature(idx, true); addFeature(spec); }
+  closeFeat(); setFeatureMode(false);
+}
+$('fType').onchange = e => {
+  if (featCtx && featCtx.idx == null) { const d = FEAT_TYPES[e.target.value]; $('fW').value = mm(d.w); $('fH').value = mm(d.h); }
+};
+$('fOk').onclick = commitFeat;
+$('fCancel').onclick = () => { closeFeat(); setFeatureMode(false); };
+$('fDel').onclick = () => { const i = featCtx && featCtx.idx; closeFeat(); if (i != null) removeFeature(i); };
+$('featDlg').addEventListener('keydown', e => { if (e.key === 'Enter') commitFeat(); else if (e.key === 'Escape') { closeFeat(); setFeatureMode(false); } });
+$('bFeat').onclick = () => setFeatureMode(!featureMode);
+$('bFeatB').onclick = () => setFeatureMode(!featureMode);
+
 function refresh(save = true) {
   const list = $('list'); list.innerHTML = '';
   dims.forEach((d, i) => {
@@ -643,6 +776,19 @@ function refresh(save = true) {
     const x = document.createElement('button'); x.textContent = '✕'; x.onclick = () => removeDim(i);
     row.append(x); list.append(row);
   });
+  if (features.length) {
+    const hd = document.createElement('div'); hd.className = 'subhead'; hd.textContent = 'Chi tiết đã ghi (' + features.length + ')'; list.append(hd);
+    features.forEach((f, i) => {
+      const t = FEAT_TYPES[f.type] || FEAT_TYPES.other;
+      const title = t.name + ' ' + mm(f.w) + '×' + mm(f.h);
+      f.el.textContent = title + (f.note ? ' · ' + f.note : '');
+      const row = document.createElement('div'); row.className = 'row';
+      row.innerHTML = `<span style="color:${hex(t.color)}">▣</span><b style="color:${hex(t.color)}" title="Bấm để sửa">${title}</b><small>${f.note || 'mm'}</small>`;
+      row.querySelector('b').onclick = () => askFeature(null, i);
+      const x = document.createElement('button'); x.textContent = '✕'; x.onclick = () => removeFeature(i);
+      row.append(x); list.append(row);
+    });
+  }
   $('count').textContent = dims.length;
   $('count2').textContent = dims.length;
   if (save) persist();
@@ -651,12 +797,17 @@ function refresh(save = true) {
 // ---------- lưu tự động theo tên file ----------
 const key = () => 'dims:' + currentName;
 function persist() {
-  try { localStorage.setItem(key(), JSON.stringify(dims.map(d => [d.a.toArray(), d.b.toArray(), d.real]))); } catch {}
+  try {
+    localStorage.setItem(key(), JSON.stringify(dims.map(d => [d.a.toArray(), d.b.toArray(), d.real])));
+    localStorage.setItem('feats:' + currentName, JSON.stringify(features.map(featSpec)));
+  } catch {}
 }
 function loadSaved() {
   try {
     const s = JSON.parse(localStorage.getItem(key()) || '[]');
     for (const [a, b, real] of s) addDim(new THREE.Vector3(...a), new THREE.Vector3(...b), real ?? null, false);
+    const fs = JSON.parse(localStorage.getItem('feats:' + currentName) || '[]');
+    for (const sp of fs) addFeature(featFromSpec(sp), false);
   } catch {}
 }
 
@@ -667,16 +818,18 @@ function download(name, blob) {
 }
 $('bSaveJson').onclick = () => {
   const data = { file: currentName, scale: modelGroup.scale.x,
-    dims: dims.map(d => ({ a: d.a.toArray(), b: d.b.toArray(), real: d.real })) };
+    dims: dims.map(d => ({ a: d.a.toArray(), b: d.b.toArray(), real: d.real })),
+    features: features.map(featSpec) };
   download(currentName.replace(/\.[^.]+$/, '') + '-sodo.json', new Blob([JSON.stringify(data, null, 1)], { type:'application/json' }));
 };
 $('jsonIn').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
     const data = JSON.parse(await f.text());
-    clearDims(false);
+    clearDims(false); clearFeatures(false);
     modelGroup.scale.setScalar(data.scale || 1); modelGroup.updateMatrixWorld(true);
     for (const d of data.dims) addDim(new THREE.Vector3(...d.a), new THREE.Vector3(...d.b), d.real ?? null, false);
+    for (const s of data.features || []) addFeature(featFromSpec(s), false);
     try { localStorage.setItem('scale:' + currentName, String(modelGroup.scale.x)); } catch {}
     refresh(true);
   } catch (err) { alert('File số đo không hợp lệ'); }
@@ -689,6 +842,12 @@ $('bCsv').onclick = () => {
     rows.push([i + 1, Math.round(valueOf(d) * 1000), d.real == null ? 'quét' : 'đo thật', S,
       d.real == null ? '' : S - Math.round(d.real * 1000)].join(','));
   });
+  if (features.length) {
+    const floorY = new THREE.Box3().setFromObject(modelGroup).min.y;   // điểm thấp nhất của mô hình, xấp xỉ mặt sàn
+    rows.push('', 'Chi tiết,Loại,Rộng (mm),Cao (mm),Ghi chú,Tâm cao hơn điểm thấp nhất mô hình (mm)');
+    features.forEach((f, i) => rows.push([i + 1, (FEAT_TYPES[f.type] || FEAT_TYPES.other).name, mm(f.w), mm(f.h),
+      '"' + (f.note || '').replace(/"/g, '""') + '"', Math.round((f.c.y - floorY) * 1000)].join(',')));
+  }
   download('kich-thuoc.csv', new Blob(['﻿' + rows.join('\n')], { type:'text/csv' }));
 };
 $('bPng').onclick = () => {
@@ -715,7 +874,7 @@ if (touchMode) {
 $('bSnap').onclick = () => { snapOn = !snapOn; setToggle($('bSnap'), snapOn); };
 $('axis').onchange = e => { axisLock = e.target.value; };
 function setUnit(u) {
-  unit = u; $('unit').value = u; $('bUnit').textContent = 'Đơn vị: ' + u;
+  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅';
   refresh(false); invalidate();
 }
 $('unit').onchange = e => setUnit(e.target.value);
