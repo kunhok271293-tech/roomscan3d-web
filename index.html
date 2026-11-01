@@ -159,7 +159,7 @@
     <div id="foot">
       <button id="bSaveProj" class="on" title="Lưu mô hình + số đo + chi tiết vào MỘT file để mở lại sau">💾 Lưu dự án</button>
       <label class="btn" title="Mở file dự án đã lưu (.do3d)">📂 Mở dự án<input id="projIn" type="file" hidden></label>
-      <button id="bObj" title="Xuất mô hình OBJ đã chỉnh tỉ lệ (đơn vị mét) để đưa vào SketchUp hoặc phần mềm thiết kế">Xuất OBJ</button>
+      <button id="bObj" title="Xuất mô hình OBJ đã chỉnh tỉ lệ, theo đơn vị đang chọn (m/cm/mm), để đưa vào SketchUp hoặc phần mềm thiết kế">Xuất OBJ</button>
       <button id="bSaveJson" title="Chỉ lưu số đo (nhẹ), cần có sẵn file mô hình">Lưu số đo</button>
       <label class="btn">Mở số đo<input id="jsonIn" type="file" accept=".json" hidden></label>
       <button id="bCsv">Xuất CSV</button>
@@ -948,17 +948,22 @@ $('projIn').addEventListener('change', async e => {
 $('bObj').onclick = async () => {
   toast('Đang xuất OBJ…'); await new Promise(r => setTimeout(r, 30));
   try {
-    modelGroup.updateMatrixWorld(true);
-    let txt = new OBJExporter().parse(modelGroup);
+    // k = số đơn vị trong file OBJ ứng với 1 mét: mô hình được nhân lên k lần để số liệu trong file đúng đơn vị đã chọn
+    const k = { m: 1, cm: 100, mm: 1000 }[unit] || 1, uname = { m: 'Meters', cm: 'Centimeters', mm: 'Millimeters' }[unit] || 'Meters';
+    const s0 = modelGroup.scale.x;
+    let txt;
+    try { modelGroup.scale.setScalar(s0 * k); modelGroup.updateMatrixWorld(true); txt = new OBJExporter().parse(modelGroup); }
+    finally { modelGroup.scale.setScalar(s0); modelGroup.updateMatrixWorld(true); }
     let n = (txt.match(/^v /gm) || []).length, extra = '';
     const names = { outlet: 'o_dien', switch: 'cong_tac', vent: 'o_gio', other: 'chi_tiet' };
     features.forEach((f, i) => {
       extra += `o ${names[f.type] || 'chi_tiet'}_${i + 1}_${mm(f.w)}x${mm(f.h)}\n`;
-      f.pts.slice(1).forEach(p => { extra += `v ${p.x} ${p.y} ${p.z}\n`; });
+      f.pts.slice(1).forEach(p => { extra += `v ${p.x * k} ${p.y * k} ${p.z * k}\n`; });
       extra += `f ${n + 1} ${n + 2} ${n + 3} ${n + 4}\n`; n += 4;
     });
-    await saveFile(baseName() + '-tilemet.obj', new Blob([txt + (txt.endsWith('\n') ? '' : '\n') + extra], { type: 'text/plain' }));
-    toast('Đã xuất OBJ (đơn vị mét, đã chỉnh tỉ lệ' + (features.length ? ', kèm ' + features.length + ' chi tiết' : '') + '). Trong SketchUp chọn đơn vị Meters.');
+    const suffix = { m: 'met', cm: 'cm', mm: 'mm' }[unit] || 'met';
+    await saveFile(baseName() + '-tile' + suffix + '.obj', new Blob([txt + (txt.endsWith('\n') ? '' : '\n') + extra], { type: 'text/plain' }));
+    toast('Đã xuất OBJ theo đơn vị ' + unit + ' (đã chỉnh tỉ lệ' + (features.length ? ', kèm ' + features.length + ' chi tiết' : '') + '). Trong SketchUp chọn đơn vị ' + uname + ' khi nhập.');
   } catch (e) { toast('Không xuất được OBJ: ' + e.message, true); }
 };
 
@@ -1002,7 +1007,7 @@ if (touchMode) {
 $('bSnap').onclick = () => { snapOn = !snapOn; setToggle($('bSnap'), snapOn); };
 $('axis').onchange = e => { axisLock = e.target.value; };
 function setUnit(u) {
-  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅'; $('pUnit').textContent = u + ' ⇅';
+  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅'; $('pUnit').textContent = u + ' ⇅'; $('bObj').textContent = 'Xuất OBJ (' + u + ')';
   refresh(false); invalidate(); pDraw();
 }
 $('unit').onchange = e => setUnit(e.target.value);
