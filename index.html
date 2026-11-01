@@ -34,7 +34,9 @@
   button:hover, label.btn:hover { border-color:var(--accent); }
   button.on { background:var(--accent); color:#000; border-color:var(--accent); }
   #side { width:280px; background:var(--panel); border-left:1px solid var(--line); display:flex; flex-direction:column; }
-  #side h3 { margin:0; padding:12px; font-size:14px; border-bottom:1px solid var(--line); }
+  #side h3 { margin:0; padding:12px; font-size:14px; border-bottom:1px solid var(--line); display:flex; align-items:center; justify-content:space-between; }
+  #sClose { display:none; }
+  .touch #sClose { display:inline-block; min-height:40px; padding:6px 14px; font-weight:700; }
   #list { flex:1; overflow:auto; padding:6px; }
   .row { display:flex; align-items:center; gap:6px; padding:6px; border-radius:6px; }
   .row:hover { background:#2f333a; }
@@ -154,7 +156,7 @@
     <div id="drop">Thả file .obj / .usdz / .glb / .ply / .stl vào đây</div>
   </div>
   <div id="side">
-    <h3>Kích thước đã đo (<span id="count">0</span>)</h3>
+    <h3><span>Kích thước đã đo (<span id="count">0</span>)</span><button id="sClose">✕ Đóng</button></h3>
     <div id="list"></div>
     <div id="foot">
       <button id="bSaveProj" class="on" title="Lưu mô hình + số đo + chi tiết vào MỘT file để mở lại sau">💾 Lưu dự án</button>
@@ -583,6 +585,11 @@ function syncFirstMarker() {
 }
 
 view.addEventListener('pointerdown', ev => {
+  // đang mở bảng danh sách: chạm ra ngoài bảng chỉ để đóng bảng, không bắt đầu đo
+  if (touchMode && ev.pointerType !== 'mouse' && $('side').classList.contains('open')) {
+    if (!ev.target.closest('#side,#bottom')) $('side').classList.remove('open');
+    return;
+  }
   if (!touchMode || ev.pointerType === 'mouse' || ev.target.closest('#toolbar,#bottom,#ask,#featDlg,#side')) return;
   pts.add(ev.pointerId);
   if (pts.size > 1) { g = null; hideLive(); hideLoupe(); cursor.visible = false; return; }   // hai ngón = di chuyển/zoom
@@ -1016,6 +1023,7 @@ setUnit(unit);
 $('bWire').onclick = () => { wire = !wire; setToggle($('bWire'), wire); modelGroup.traverse(o => { if (o.isMesh && o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.wireframe = wire); }); };
 $('bFit').onclick = fit;
 $('bList').onclick = () => $('side').classList.toggle('open');
+$('sClose').onclick = () => $('side').classList.remove('open');
 if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => {});
 
 addEventListener('keydown', e => {
