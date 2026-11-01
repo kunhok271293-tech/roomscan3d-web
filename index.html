@@ -154,7 +154,7 @@ scene.background = new THREE.Color(0x1b1d21);
 const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
 camera.position.set(6, 5, 6);
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
+controls.enableDamping = false;   // thả tay là dừng ngay, không trượt thêm
 controls.zoomToCursor = true;     // zoom vào đúng chỗ đang trỏ để chọn điểm chính xác
 controls.minDistance = 0.05;
 // Điện thoại: lúc đang xoay/zoom hạ độ phân giải xuống 1x cho mượt, dừng tay 0,2 giây thì trả lại nét
