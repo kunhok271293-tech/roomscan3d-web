@@ -44,6 +44,9 @@
   #foot { padding:10px; border-top:1px solid var(--line); display:flex; flex-wrap:wrap; gap:6px; }
   #hint { position:absolute; bottom:10px; left:10px; background:rgba(0,0,0,.6); padding:6px 10px; border-radius:6px; color:var(--muted); font-size:12px; max-width:70%; }
   #drop { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.6); font-size:20px; }
+  #toast { display:none; position:absolute; left:10px; right:10px; top:60px; z-index:7; background:rgba(20,20,20,.92); color:#fff;
+    border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:13px; pointer-events:none; }
+  #toast.bad { border-color:#ff2d20; color:#ff8a80; }
   #bottom { display:none; }
   /* Giao diện điện thoại / máy tính bảng */
   .touch #app { height:100dvh; }
@@ -99,6 +102,7 @@
         <button id="askCancel">Huỷ</button>
       </div>
     </div>
+    <div id="toast"></div>
     <div id="drop">Thả file .obj / .usdz / .glb / .ply / .stl vào đây</div>
   </div>
   <div id="side">
@@ -220,7 +224,22 @@ async function loadFile(file) {
     else if (ext === 'stl') obj = new THREE.Mesh(new STLLoader().parse(await file.arrayBuffer()));
     else throw new Error('Định dạng không hỗ trợ');
     setModel(obj);
-  } catch (e) { alert('Không đọc được file: ' + e.message); }
+    let meshes = 0, tris = 0;
+    modelGroup.traverse(o => { if (o.isMesh) { meshes++; const g = o.geometry; tris += (g.index ? g.index.count : g.attributes.position.count) / 3; } });
+    const box = new THREE.Box3().setFromObject(modelGroup), s = box.getSize(new THREE.Vector3());
+    if (!meshes || box.isEmpty() || !isFinite(s.x)) {
+      toast('Không đọc được hình 3D trong file "' + file.name + '". Với Quét phòng, hãy dùng file OBJ thay vì USDZ.', true);
+    } else {
+      toast(file.name + ': ' + meshes + ' khối, ' + Math.round(tris) + ' tam giác, kích thước ' +
+        s.x.toFixed(2) + ' × ' + s.y.toFixed(2) + ' × ' + s.z.toFixed(2) + ' m');
+    }
+  } catch (e) { toast('Không đọc được file: ' + e.message, true); }
+}
+let toastTimer;
+function toast(msg, bad = false) {
+  const t = $('toast'); t.textContent = msg; t.className = bad ? 'bad' : '';
+  t.style.display = 'block'; clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { t.style.display = 'none'; }, bad ? 15000 : 6000);
 }
 $('file').addEventListener('change', e => { const f = e.target.files[0]; if (f) loadFile(f); });
 addEventListener('dragover', e => { e.preventDefault(); $('drop').style.display = 'flex'; });
