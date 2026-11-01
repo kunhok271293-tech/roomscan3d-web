@@ -546,20 +546,35 @@ function computeRoomAxes() {
 // Tự thẳng hàng trục: gần song song với X/Y/Z (lệch dưới ~5°) thì hút cho thẳng. Không áp dụng khi đã bám góc/cạnh.
 let alignOn = true, alignedAxis = null;
 const ALIGN_COS = Math.cos(5 * Math.PI / 180), AXIS_COLORS = { X: 0xff5252, Y: 0x00e676, Z: 0x448aff };
+// Điểm nằm trên đường trục đi qua điểm đầu. Nếu đường đó cắt mô hình gần chỗ con trỏ thì hút đúng vào giao điểm,
+// để điểm thứ hai nằm trên bề mặt (không lơ lửng), ví dụ khi đo từ tường này sang tường đối diện.
+function axisPoint(ax, d) {
+  const t = d.dot(ax);
+  let q = first.clone().addScaledVector(ax, t);
+  if (Math.abs(t) > 0.05) {
+    const dir = ax.clone().multiplyScalar(t >= 0 ? 1 : -1);
+    raycaster.set(first.clone().addScaledVector(dir, 0.02), dir);        // bỏ qua 2 cm đầu để không dính chính mặt chứa điểm đầu
+    raycaster.far = Math.abs(t) + 1;
+    const h = raycaster.intersectObjects(modelGroup.children, true)[0];
+    raycaster.far = Infinity;
+    if (h) {
+      const k = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / (renderer.domElement.clientHeight || 1);
+      if (h.point.distanceTo(q) < Math.max(0.01, camera.position.distanceTo(q) * k * 30)) q = h.point.clone();   // trong ~30 px
+    }
+  }
+  return q;
+}
 function applyLock(p, kind = 'face') {
   alignedAxis = null;
   if (!first) return p;
   const d = p.clone().sub(first), len = d.length();
-  if (axisLock !== 'auto') {
-    const ax = roomAxes[axisLock.toUpperCase()]; alignedAxis = axisLock.toUpperCase();
-    return first.clone().addScaledVector(ax, d.dot(ax));
-  }
+  if (axisLock !== 'auto') { alignedAxis = axisLock.toUpperCase(); return axisPoint(roomAxes[alignedAxis], d); }
   if (!alignOn || kind !== 'face' || len < 1e-6) return p;
   let best = null, bc = ALIGN_COS;
   for (const name of ['X', 'Y', 'Z']) { const c = Math.abs(d.dot(roomAxes[name])) / len; if (c > bc) { bc = c; best = name; } }
   if (!best) return p;
   alignedAxis = best;
-  return first.clone().addScaledVector(roomAxes[best], d.dot(roomAxes[best]));
+  return axisPoint(roomAxes[best], d);
 }
 
 // Chấm có kích thước cố định theo pixel trên màn hình, không to lên khi zoom ra
@@ -1135,15 +1150,28 @@ function drawNotes(x, tf, s, live) {
     x.stroke(); x.setLineDash([]);
     P.calPts.forEach(p => dot(x, S(p), 5 * s, '#00e5ff'));
   }
+  // vẽ đường dim trước, nhãn sau; nhãn nào chồng lên nhãn đã đặt thì đẩy dọc theo phương vuông góc với đường dim
+  const placed = [], hit = (a, b) => a.x < b.x + b.w + 2 * s && b.x < a.x + a.w + 2 * s && a.y < b.y + b.h + 2 * s && b.y < a.y + a.h + 2 * s;
   for (const d of P.dims) {
-    const A = S(d.a), B = S(d.b), col = d.real != null ? '#ff5a4d' : '#aab0b6';
+    const A = S(d.a), B = S(d.b);
     x.strokeStyle = '#ff1f1f'; x.lineWidth = 2 * s; x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke();
     dot(x, A, 4.5 * s, '#ff1f1f'); dot(x, B, 4.5 * s, '#ff1f1f');
+  }
+  for (const d of P.dims) {
+    const A = S(d.a), B = S(d.b), col = d.real != null ? '#ff5a4d' : '#aab0b6';
     const txt = dimText(d), w = x.measureText(txt).width + 14 * s, h = 24 * s, m = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-    x.fillStyle = 'rgba(20,20,20,.9)'; x.fillRect(m.x - w / 2, m.y - h / 2, w, h);
-    x.strokeStyle = col; x.lineWidth = 1.2 * s; x.strokeRect(m.x - w / 2, m.y - h / 2, w, h);
-    x.fillStyle = col; x.fillText(txt, m.x, m.y + 1);
-    if (live) d.lab = { x: m.x - w / 2, y: m.y - h / 2, w, h };
+    const L = Math.hypot(B.x - A.x, B.y - A.y) || 1, nx = -(B.y - A.y) / L, ny = (B.x - A.x) / L;
+    let rect = { x: m.x - w / 2, y: m.y - h / 2, w, h }, moved = false;
+    for (let k = 0; k < 14 && placed.some(p => hit(rect, p)); k++) {
+      const step = (Math.floor(k / 2) + 1) * (h + 3 * s) * (k % 2 ? -1 : 1);
+      rect = { x: m.x + nx * step - w / 2, y: m.y + ny * step - h / 2, w, h }; moved = true;
+    }
+    placed.push(rect);
+    if (moved) { x.strokeStyle = col; x.lineWidth = 1 * s; x.beginPath(); x.moveTo(m.x, m.y); x.lineTo(rect.x + w / 2, rect.y + h / 2); x.stroke(); }
+    x.fillStyle = 'rgba(20,20,20,.92)'; x.fillRect(rect.x, rect.y, w, h);
+    x.strokeStyle = col; x.lineWidth = 1.2 * s; x.strokeRect(rect.x, rect.y, w, h);
+    x.fillStyle = col; x.fillText(txt, rect.x + w / 2, rect.y + h / 2 + 1);
+    if (live) d.lab = rect;
   }
   if (P.pending) dot(x, S(P.pending), 5 * s, '#ff1f1f');
 }
@@ -1338,6 +1366,21 @@ $('pSave').onclick = () => {
   });
 };
 
+// Nhãn số đo chồng lên nhau trên màn hình thì đẩy lệch theo chiều dọc cho từng nhãn đọc được
+function declutterLabels() {
+  const els = [...$('labels').querySelectorAll('.dim-label')].filter(e => e.style.display !== 'none' && e.textContent);
+  for (const e of els) e.style.marginTop = '0px';
+  const rects = els.map(e => e.getBoundingClientRect()), placed = [];
+  els.forEach((e, i) => {
+    const r = rects[i], h = r.height + 3;
+    const hit = dy => placed.some(p => r.left < p.right + 2 && p.left < r.right + 2 && r.top + dy < p.bottom + 2 && p.top < r.bottom + dy + 2);
+    let dy = 0;
+    for (let k = 0; k < 12 && hit(dy); k++) dy = (Math.floor(k / 2) + 1) * h * (k % 2 ? -1 : 1);
+    if (dy) e.style.marginTop = dy + 'px';
+    placed.push({ left: r.left, right: r.right, top: r.top + dy, bottom: r.bottom + dy });
+  });
+}
+
 // ---------- loop ----------
 // Chỉ vẽ lại khi có thay đổi (xoay/zoom/chạm/đo) để máy không nóng và không giật
 ['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'wheel', 'keydown', 'click', 'resize'].forEach(t =>
@@ -1349,6 +1392,7 @@ function loop(now = 0) {
     scaleMarkers();
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
+    declutterLabels();
     drawLoupe();
     dirty = false; lastRender = now;
   }
