@@ -109,9 +109,10 @@
       <button id="bFeat" title="Ghi nhận ổ điện, ô gió… lên mô hình">▣ Chi tiết</button>
       <button id="bPhoto" title="Mở ảnh chụp và đo trên ảnh">🖼 Ảnh</button>
       <button id="bSnap" class="on" title="Phím S">🧲 Bám điểm</button>
+      <button id="bAlign" class="on" title="Phím T: khi rê điểm thứ hai gần song song với trục thì tự hút cho thẳng hàng (đỏ = X, xanh lá = đứng, xanh dương = Z)">∥ Thẳng trục</button>
       <select id="axis" title="Khoá trục (A/X/Y/Z)">
-        <option value="auto">Trục: tự do</option><option value="x">Khoá X</option>
-        <option value="y">Khoá Y (cao)</option><option value="z">Khoá Z</option>
+        <option value="auto">Trục: tự do</option><option value="x">Khoá X (dọc tường)</option>
+        <option value="y">Khoá Y (chiều cao)</option><option value="z">Khoá Z (dọc tường)</option>
       </select>
       <select id="unit"><option value="m">m</option><option value="cm" selected>cm</option><option value="mm">mm</option></select>
       <button id="bWire">Khung lưới</button>
@@ -289,6 +290,7 @@ function setModel(obj) {
   });
   modelGroup.add(obj);
   fit();
+  computeRoomAxes();
   loadSaved();
   invalidate();
 }
@@ -506,10 +508,58 @@ function pick(ev) {
   return { p, kind, n: nrm };
 }
 
-function applyLock(p) {
-  if (!first || axisLock === 'auto') return p;
-  const ax = new THREE.Vector3(axisLock === 'x' ? 1 : 0, axisLock === 'y' ? 1 : 0, axisLock === 'z' ? 1 : 0);
-  return first.clone().addScaledVector(ax, p.clone().sub(first).dot(ax));
+// Trục của căn phòng: X, Z chạy dọc theo tường (tự dò từ mô hình), Y là chiều đứng.
+// (Trục X/Z gốc của mô hình quét lấy theo hướng điện thoại lúc bắt đầu quét nên thường không trùng hướng tường.)
+const roomAxes = { X: new THREE.Vector3(1, 0, 0), Y: new THREE.Vector3(0, 1, 0), Z: new THREE.Vector3(0, 0, 1), deg: 0 };
+function computeRoomAxes() {
+  const bins = new Float64Array(90), angs = [], wts = [], A = new THREE.Vector3(), B = new THREE.Vector3(), C = new THREE.Vector3(), n = new THREE.Vector3(), e = new THREE.Vector3();
+  modelGroup.updateMatrixWorld(true);
+  modelGroup.traverse(o => {
+    if (!o.isMesh) return;
+    const g = o.geometry, pos = g.attributes.position, idx = g.index, tri = idx ? idx.count / 3 : pos.count / 3, step = Math.max(1, Math.floor(tri / 60000));
+    for (let t = 0; t < tri; t += step) {
+      const i0 = idx ? idx.getX(t * 3) : t * 3, i1 = idx ? idx.getX(t * 3 + 1) : t * 3 + 1, i2 = idx ? idx.getX(t * 3 + 2) : t * 3 + 2;
+      A.fromBufferAttribute(pos, i0).applyMatrix4(o.matrixWorld); B.fromBufferAttribute(pos, i1).applyMatrix4(o.matrixWorld); C.fromBufferAttribute(pos, i2).applyMatrix4(o.matrixWorld);
+      n.subVectors(B, A).cross(e.subVectors(C, A));
+      const area = n.length() / 2; if (area < 1e-12) continue;
+      n.normalize(); if (Math.abs(n.y) > 0.5) continue;                       // chỉ lấy mặt đứng (tường, tủ…)
+      let a = Math.atan2(n.z, n.x) * 180 / Math.PI; a = ((a % 90) + 90) % 90;  // hướng pháp tuyến, lặp mỗi 90°
+      bins[Math.min(89, Math.floor(a))] += area; angs.push(a); wts.push(area);
+    }
+  });
+  let best = 0, bv = 0;
+  for (let i = 0; i < 90; i++) { let s = 0; for (let k = -2; k <= 2; k++) s += bins[(i + k + 90) % 90]; if (s > bv) { bv = s; best = i; } }
+  let deg = 0;
+  if (bv > 0) {
+    // trung bình tròn (chu kỳ 90°) các góc nằm trong ±8° quanh đỉnh, để lấy hướng chính xác tới phần mười độ
+    const centre = best + 0.5; let sc = 0, ss = 0;
+    for (let i = 0; i < angs.length; i++) {
+      let df = angs[i] - centre; df = ((df + 45) % 90 + 90) % 90 - 45;
+      if (Math.abs(df) <= 8) { const r = 4 * angs[i] * Math.PI / 180; sc += wts[i] * Math.cos(r); ss += wts[i] * Math.sin(r); }
+    }
+    deg = (Math.atan2(ss, sc) * 180 / Math.PI) / 4; if (deg < 0) deg += 90;
+  }
+  const th = deg * Math.PI / 180;
+  roomAxes.X.set(Math.cos(th), 0, Math.sin(th)); roomAxes.Z.set(-Math.sin(th), 0, Math.cos(th)); roomAxes.deg = deg;
+}
+
+// Tự thẳng hàng trục: gần song song với X/Y/Z (lệch dưới ~5°) thì hút cho thẳng. Không áp dụng khi đã bám góc/cạnh.
+let alignOn = true, alignedAxis = null;
+const ALIGN_COS = Math.cos(5 * Math.PI / 180), AXIS_COLORS = { X: 0xff5252, Y: 0x00e676, Z: 0x448aff };
+function applyLock(p, kind = 'face') {
+  alignedAxis = null;
+  if (!first) return p;
+  const d = p.clone().sub(first), len = d.length();
+  if (axisLock !== 'auto') {
+    const ax = roomAxes[axisLock.toUpperCase()]; alignedAxis = axisLock.toUpperCase();
+    return first.clone().addScaledVector(ax, d.dot(ax));
+  }
+  if (!alignOn || kind !== 'face' || len < 1e-6) return p;
+  let best = null, bc = ALIGN_COS;
+  for (const name of ['X', 'Y', 'Z']) { const c = Math.abs(d.dot(roomAxes[name])) / len; if (c > bc) { bc = c; best = name; } }
+  if (!best) return p;
+  alignedAxis = best;
+  return first.clone().addScaledVector(roomAxes[best], d.dot(roomAxes[best]));
 }
 
 // Chấm có kích thước cố định theo pixel trên màn hình, không to lên khi zoom ra
@@ -529,13 +579,14 @@ function hover(ev) {
   if (!measureOn) return;
   const h = pick(ev);
   if (!h) { cursor.visible = false; liveLine.visible = false; liveLabel.visible = false; return; }
-  const p = applyLock(h.p);
+  const p = applyLock(h.p, h.kind);
   cursor.position.copy(p); cursor.visible = true; lastKind = h.kind;
   cursor.material.color.set(h.kind === 'vertex' ? 0x00e676 : h.kind === 'edge' ? 0xffab00 : 0x00e5ff);
   if (first) {
     liveLine.geometry.setFromPoints([first, p]); liveLine.visible = true;
+    liveLine.material.color.set(alignedAxis ? AXIS_COLORS[alignedAxis] : 0xff8a80);   // đỏ/xanh lá/xanh dương = song song trục X/Y/Z
     liveLabel.position.copy(first).lerp(p, .5);
-    liveLabelEl.textContent = fmt(first.distanceTo(p)); liveLabel.visible = true;
+    liveLabelEl.textContent = fmt(first.distanceTo(p)) + (alignedAxis ? '  ∥ ' + (alignedAxis === 'Y' ? 'Y (đứng)' : alignedAxis) : ''); liveLabel.visible = true;
   }
 }
 
@@ -607,7 +658,7 @@ function endTouch(ev) {
   const h = pick(off(ev));
   if (!h) { hideLive(); return; }
   if (featureMode) { hideLive(); askFeature({ c: h.p, n: h.n }); return; }
-  const p = applyLock(h.p);
+  const p = applyLock(h.p, h.kind);
   if (!first) { first = p.clone(); hideLive(); return; }
   const a = first; first = null; hideLive();
   if (a.distanceTo(p) > 1e-4) ask(a, p.clone());
@@ -628,7 +679,7 @@ function placeAt(ev) {
   if (!measureOn || askCtx) return;
   const h = pick(ev); if (!h) return;
   if (featureMode) { askFeature({ c: h.p, n: h.n }); return; }
-  const p = applyLock(h.p);
+  const p = applyLock(h.p, h.kind);
   if (!first) { first = p.clone(); }
   else {
     const a = first.clone();
@@ -1012,6 +1063,7 @@ if (touchMode) {
   setTimeout(() => { if (!first) $('hint').style.display = 'none'; }, 9000);
 }
 $('bSnap').onclick = () => { snapOn = !snapOn; setToggle($('bSnap'), snapOn); };
+$('bAlign').onclick = () => { alignOn = !alignOn; setToggle($('bAlign'), alignOn); };
 $('axis').onchange = e => { axisLock = e.target.value; };
 function setUnit(u) {
   unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅'; $('pUnit').textContent = u + ' ⇅'; $('bObj').textContent = 'Xuất OBJ (' + u + ')';
@@ -1032,6 +1084,7 @@ addEventListener('keydown', e => {
   if (k === 'escape') { first = null; liveLine.visible = liveLabel.visible = false; }
   else if (k === 'z' && (e.ctrlKey || e.metaKey)) { if (first) first = null; else if (dims.length) removeDim(dims.length - 1); }
   else if (k === 's') $('bSnap').click();
+  else if (k === 't') $('bAlign').click();
   else if (k === 'm') $('bMeasure').click();
   else if (['a', 'x', 'y', 'z'].includes(k) && !e.ctrlKey && !e.metaKey) {
     axisLock = k === 'a' ? 'auto' : k; $('axis').value = axisLock;
