@@ -56,6 +56,20 @@
   #featDlg .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
   .dim-label.feat { background:rgba(20,20,20,.9); }
   .subhead { margin:10px 6px 4px; font-size:12px; color:var(--muted); text-transform:uppercase; letter-spacing:.04em; }
+  /* Chế độ đo trên ảnh chụp */
+  #photo { display:none; position:fixed; inset:0; z-index:30; background:#111; flex-direction:column; }
+  #pbar { display:flex; gap:6px; padding:8px; overflow-x:auto; background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
+  #pbar > * { flex:none; }
+  #pMsg { padding:6px 10px; font-size:13px; color:var(--muted); background:#1b1d21; flex:none; }
+  #pCanvas { flex:1; min-height:0; width:100%; display:block; touch-action:none; }
+  #pCalPick, #pd { display:none; position:absolute; top:100px; left:50%; transform:translateX(-50%); z-index:35; background:var(--panel);
+    border:1px solid #00b0ff; border-radius:8px; padding:14px; width:min(340px, 92vw); box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  #pCalPick button { display:block; width:100%; margin-top:8px; text-align:left; }
+  #pCalPick small { color:var(--muted); display:block; font-size:11px; }
+  #pd input { width:100%; font:600 18px system-ui; padding:8px; margin:6px 0; background:#15171a; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; }
+  #pd .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
+  #pdHint { color:var(--muted); font-size:12px; }
   #loupe { display:none; position:absolute; top:66px; width:130px; height:130px; border-radius:50%; border:2px solid #fff;
     box-shadow:0 4px 16px rgba(0,0,0,.6); z-index:6; pointer-events:none; background:#111; }
   #bottom { display:none; }
@@ -90,6 +104,7 @@
       <label class="btn">Mở file 3D<input id="file" type="file" accept=".obj,.glb,.gltf,.usdz,.ply,.stl" hidden></label>
       <button id="bMeasure" class="on" title="Phím M">📏 Đo</button>
       <button id="bFeat" title="Ghi nhận ổ điện, ô gió… lên mô hình">▣ Chi tiết</button>
+      <button id="bPhoto" title="Mở ảnh chụp và đo trên ảnh">🖼 Ảnh</button>
       <button id="bSnap" class="on" title="Phím S">🧲 Bám điểm</button>
       <select id="axis" title="Khoá trục (A/X/Y/Z)">
         <option value="auto">Trục: tự do</option><option value="x">Khoá X</option>
@@ -147,6 +162,32 @@
       <button id="bPng">Ảnh PNG</button>
       <button id="bClear">Xoá hết</button>
     </div>
+  </div>
+</div>
+
+<div id="photo">
+  <div id="pbar">
+    <button id="pBack">← Mô hình 3D</button>
+    <label class="btn">🖼 Mở ảnh<input id="pFile" type="file" accept="image/*" hidden></label>
+    <button id="pCal">① Chuẩn tỉ lệ</button>
+    <button id="pUnit">cm ⇅</button>
+    <button id="pUndo">↶</button>
+    <button id="pSave">Lưu ảnh</button>
+  </div>
+  <div id="pMsg"></div>
+  <canvas id="pCanvas"></canvas>
+  <div id="pCalPick">
+    <b>Chuẩn tỉ lệ bằng một kích thước đã biết trong ảnh</b>
+    <button id="pcLine">Một đoạn đã biết chiều dài<small>Chụp thẳng góc, vật mẫu nằm cùng mặt phẳng với chỗ cần đo (ví dụ thước, khung cửa).</small></button>
+    <button id="pcRect">Hình chữ nhật đã biết kích thước<small>Chính xác hơn, bù được ảnh chụp nghiêng (ví dụ tờ A4 210×297, mặt ổ điện, tấm gạch).</small></button>
+    <button id="pcCancel">Huỷ</button>
+  </div>
+  <div id="pd">
+    <b id="pdTitle"></b>
+    <div id="pdHint"></div>
+    <input id="pdIn1" inputmode="decimal" autocomplete="off">
+    <input id="pdIn2" inputmode="decimal" autocomplete="off">
+    <div class="btns"><button id="pdOk" class="on">Ghi</button><button id="pdExtra"></button><button id="pdCancel">Huỷ</button></div>
   </div>
 </div>
 
@@ -874,8 +915,8 @@ if (touchMode) {
 $('bSnap').onclick = () => { snapOn = !snapOn; setToggle($('bSnap'), snapOn); };
 $('axis').onchange = e => { axisLock = e.target.value; };
 function setUnit(u) {
-  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅';
-  refresh(false); invalidate();
+  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅'; $('pUnit').textContent = u + ' ⇅';
+  refresh(false); invalidate(); pDraw();
 }
 $('unit').onchange = e => setUnit(e.target.value);
 $('bUnit').onclick = () => setUnit({ cm: 'mm', mm: 'm', m: 'cm' }[unit]);
@@ -896,6 +937,253 @@ addEventListener('keydown', e => {
     axisLock = k === 'a' ? 'auto' : k; $('axis').value = axisLock;
   }
 });
+
+// ---------- đo trên ảnh chụp ----------
+// Ảnh được chuẩn tỉ lệ bằng một đoạn hoặc một hình chữ nhật đã biết kích thước (hình chữ nhật bù được ảnh chụp nghiêng).
+// Số đo chỉ đúng với các điểm nằm CÙNG MẶT PHẲNG với vật mẫu dùng để chuẩn tỉ lệ.
+var P = { visible: false, img: null, scale: 1, ox: 0, oy: 0, dims: [], calPts: [], calMode: null, cal: null, map: null, pending: null };
+const pc = $('pCanvas'), pctx = pc.getContext('2d');
+const pp = new Map(); let pg = null;
+const toImgP = (sx, sy) => ({ x: (sx - P.ox) / P.scale, y: (sy - P.oy) / P.scale });
+const toScrP = p => ({ x: p.x * P.scale + P.ox, y: p.y * P.scale + P.oy });
+const pDist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+
+function pMsgUpdate() {
+  let t;
+  if (!P.img) t = 'Bấm "🖼 Mở ảnh" để chọn ảnh chụp (nên chụp thẳng góc với mặt cần đo).';
+  else if (P.calMode === 'line') t = `Chuẩn tỉ lệ: chạm 2 đầu của đoạn đã biết chiều dài (${P.calPts.length}/2).`;
+  else if (P.calMode === 'rect') t = `Chuẩn tỉ lệ: chạm 4 góc theo thứ tự trái-trên, phải-trên, phải-dưới, trái-dưới (${P.calPts.length}/4).`;
+  else if (P.pending) t = 'Chạm điểm thứ hai.';
+  else if (P.map) t = 'Đã chuẩn tỉ lệ. Chạm 2 điểm để đo; chạm vào số đo để nhập số thật; kéo chấm để chỉnh; hai ngón để zoom.';
+  else t = 'Chưa chuẩn tỉ lệ: bấm ① để chuẩn, hoặc cứ đo rồi nhập số thật cho từng đoạn.';
+  $('pMsg').textContent = t;
+}
+function pResize() {
+  const dpr = Math.min(devicePixelRatio || 1, 2), w = pc.clientWidth, h = pc.clientHeight;
+  pc.width = Math.round(w * dpr); pc.height = Math.round(h * dpr);
+  pctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+function pFit() {
+  if (!P.img) return;
+  const w = pc.clientWidth, h = pc.clientHeight, s = Math.min(w / P.img.width, h / P.img.height);
+  P.scale = s; P.ox = (w - P.img.width * s) / 2; P.oy = (h - P.img.height * s) / 2;
+}
+function dimText(d) { return d.real != null ? fmt(d.real) : (P.map ? '≈ ' + fmt(mmDistP(d.a, d.b) / 1000) : '?'); }
+function mmDistP(a, b) { const A = P.map(a), B = P.map(b); return Math.hypot(A.x - B.x, A.y - B.y); }
+
+function dot(x, p, r, col) { x.fillStyle = col; x.beginPath(); x.arc(p.x, p.y, r, 0, 6.2832); x.fill(); x.strokeStyle = '#000'; x.lineWidth = 1; x.stroke(); }
+function drawNotes(x, tf, s, live) {
+  const S = p => ({ x: p.x * tf.scale + tf.ox, y: p.y * tf.scale + tf.oy });
+  x.lineJoin = 'round'; x.font = `600 ${14 * s}px system-ui,sans-serif`; x.textBaseline = 'middle'; x.textAlign = 'center';
+  if (P.calPts.length) {
+    x.strokeStyle = '#00e5ff'; x.lineWidth = 2 * s; x.setLineDash([6 * s, 4 * s]); x.beginPath();
+    P.calPts.forEach((p, i) => { const q = S(p); i ? x.lineTo(q.x, q.y) : x.moveTo(q.x, q.y); });
+    if (P.calPts.length === 4) x.closePath();
+    x.stroke(); x.setLineDash([]);
+    P.calPts.forEach(p => dot(x, S(p), 5 * s, '#00e5ff'));
+  }
+  for (const d of P.dims) {
+    const A = S(d.a), B = S(d.b), col = d.real != null ? '#ff5a4d' : '#aab0b6';
+    x.strokeStyle = '#ff1f1f'; x.lineWidth = 2 * s; x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke();
+    dot(x, A, 4.5 * s, '#ff1f1f'); dot(x, B, 4.5 * s, '#ff1f1f');
+    const txt = dimText(d), w = x.measureText(txt).width + 14 * s, h = 24 * s, m = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+    x.fillStyle = 'rgba(20,20,20,.9)'; x.fillRect(m.x - w / 2, m.y - h / 2, w, h);
+    x.strokeStyle = col; x.lineWidth = 1.2 * s; x.strokeRect(m.x - w / 2, m.y - h / 2, w, h);
+    x.fillStyle = col; x.fillText(txt, m.x, m.y + 1);
+    if (live) d.lab = { x: m.x - w / 2, y: m.y - h / 2, w, h };
+  }
+  if (P.pending) dot(x, S(P.pending), 5 * s, '#ff1f1f');
+}
+function pDraw() {
+  if (!P || !P.visible) return;
+  const w = pc.clientWidth, h = pc.clientHeight;
+  pctx.clearRect(0, 0, w, h);
+  if (P.img) { pctx.drawImage(P.img, P.ox, P.oy, P.img.width * P.scale, P.img.height * P.scale); drawNotes(pctx, P, 1, true); }
+  pMsgUpdate();
+}
+
+// phép biến đổi từ toạ độ ảnh (px) sang toạ độ mặt phẳng thật (mm)
+function homography(src, dst) {
+  const A = [], b = [];
+  for (let i = 0; i < 4; i++) {
+    const [x, y] = [src[i].x, src[i].y], [u, v] = dst[i];
+    A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]); b.push(u);
+    A.push([0, 0, 0, x, y, 1, -v * x, -v * y]); b.push(v);
+  }
+  for (let c = 0; c < 8; c++) {                       // khử Gauss có chọn trụ
+    let p = c; for (let r = c + 1; r < 8; r++) if (Math.abs(A[r][c]) > Math.abs(A[p][c])) p = r;
+    [A[c], A[p]] = [A[p], A[c]]; [b[c], b[p]] = [b[p], b[c]];
+    if (Math.abs(A[c][c]) < 1e-12) return null;
+    for (let r = c + 1; r < 8; r++) { const f = A[r][c] / A[c][c]; for (let k = c; k < 8; k++) A[r][k] -= f * A[c][k]; b[r] -= f * b[c]; }
+  }
+  const h = new Array(8);
+  for (let r = 7; r >= 0; r--) { let s = b[r]; for (let k = r + 1; k < 8; k++) s -= A[r][k] * h[k]; h[r] = s / A[r][r]; }
+  return h;
+}
+function pRecalc() {
+  const c = P.cal; P.map = null;
+  if (!c || P.calPts.length < (c.type === 'line' ? 2 : 4)) return;
+  if (c.type === 'line') {
+    const k = (c.len * 1000) / (pDist(P.calPts[0], P.calPts[1]) || 1);
+    P.map = p => ({ x: p.x * k, y: p.y * k });
+  } else {
+    const h = homography(P.calPts, [[0, 0], [c.W, 0], [c.W, c.H], [0, c.H]]);
+    if (h) P.map = p => { const d = h[6] * p.x + h[7] * p.y + 1; return { x: (h[0] * p.x + h[1] * p.y + h[2]) / d, y: (h[3] * p.x + h[4] * p.y + h[5]) / d }; };
+  }
+}
+
+// hộp thoại nhập liệu dùng chung (trả về Promise)
+function pDialog(title, hint, f1, f2, extra) {
+  return new Promise(res => {
+    $('pdTitle').textContent = title; $('pdHint').textContent = hint || '';
+    $('pdIn1').placeholder = f1.ph; $('pdIn1').value = f1.val ?? '';
+    $('pdIn2').style.display = f2 ? '' : 'none'; if (f2) { $('pdIn2').placeholder = f2.ph; $('pdIn2').value = f2.val ?? ''; }
+    $('pdExtra').style.display = extra ? '' : 'none'; if (extra) $('pdExtra').textContent = extra;
+    $('pd').style.display = 'block'; setTimeout(() => $('pdIn1').focus(), 0);
+    const done = v => { $('pd').style.display = 'none'; res(v); };
+    $('pdOk').onclick = () => done({ a: $('pdIn1').value, b: $('pdIn2').value });
+    $('pdExtra').onclick = () => done({ extra: true });
+    $('pdCancel').onclick = () => done(null);
+    $('pd').onkeydown = e => { if (e.key === 'Enter') $('pdOk').click(); else if (e.key === 'Escape') done(null); };
+  });
+}
+async function pFinishCal() {
+  const kind = P.calMode; let r;
+  if (kind === 'line') {
+    r = await pDialog('Chiều dài thật của đoạn vừa chọn', 'Đơn vị mặc định: ' + unit, { ph: 'vd 2100 hoặc 2.1m' });
+    const len = r && parseLen(r.a);
+    if (len > 0) P.cal = { type: 'line', len };
+  } else {
+    r = await pDialog('Kích thước thật của hình chữ nhật', 'Rộng × cao, đơn vị mặc định: mm. Ví dụ tờ A4 đứng: 210 và 297.', { ph: 'Rộng (mm)' }, { ph: 'Cao (mm)' });
+    const W = r && parseLen(r.a, 'mm') * 1000, H = r && parseLen(r.b, 'mm') * 1000;
+    if (W > 0 && H > 0) P.cal = { type: 'rect', W, H };
+  }
+  P.calMode = null;
+  if (!P.cal) P.calPts = [];
+  pRecalc(); pDraw();
+}
+async function pNewDim(a, b) {
+  const comp = P.map ? mmDistP(a, b) / 1000 : null;
+  const r = await pDialog('Số đo thật', comp != null ? 'Tính từ ảnh: ' + fmt(comp) + ' (chỉ tham khảo). Đơn vị mặc định: ' + unit : 'Chưa chuẩn tỉ lệ nên chưa có số tính từ ảnh. Đơn vị mặc định: ' + unit,
+    { ph: 'vd 2650 hoặc 2.65m' }, null, comp != null ? 'Dùng số từ ảnh' : null);
+  if (!r) return;
+  if (r.extra) { P.dims.push({ a, b, real: null }); }
+  else { const v = parseLen(r.a); if (v > 0) P.dims.push({ a, b, real: v }); }
+  pDraw();
+}
+async function pTap(sx, sy) {
+  for (const d of P.dims) if (d.lab && sx >= d.lab.x && sx <= d.lab.x + d.lab.w && sy >= d.lab.y && sy <= d.lab.y + d.lab.h) {
+    const comp = P.map ? mmDistP(d.a, d.b) / 1000 : null;
+    const r = await pDialog('Sửa số đo thật', comp != null ? 'Tính từ ảnh: ' + fmt(comp) + '. Đơn vị mặc định: ' + unit : 'Đơn vị mặc định: ' + unit,
+      { ph: 'số đo thật', val: d.real != null ? num(d.real) : '' }, null, comp != null ? 'Dùng số từ ảnh' : null);
+    if (r) { if (r.extra) d.real = null; else { const v = parseLen(r.a); if (v > 0) d.real = v; } }
+    pDraw(); return;
+  }
+  const ip = toImgP(sx, sy);
+  if (P.calMode) {
+    P.calPts.push(ip); pDraw();
+    if (P.calPts.length === (P.calMode === 'line' ? 2 : 4)) await pFinishCal();
+    return;
+  }
+  if (!P.pending) { P.pending = ip; pDraw(); return; }
+  const a = P.pending; P.pending = null; pDraw();
+  if (pDist(a, ip) > 1) await pNewDim(a, ip);
+}
+function pHit(sx, sy) {
+  let best = touchMode ? 28 : 14, hit = null;
+  const test = (p, h) => { const q = toScrP(p), d = Math.hypot(q.x - sx, q.y - sy); if (d < best) { best = d; hit = h; } };
+  P.calPts.forEach((p, i) => test(p, { arr: P.calPts, i }));
+  P.dims.forEach(d => { test(d.a, { obj: d, k: 'a' }); test(d.b, { obj: d, k: 'b' }); });
+  if (P.pending) test(P.pending, { pend: true });
+  return hit;
+}
+function pXY(e) { const r = pc.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+pc.addEventListener('pointerdown', e => {
+  if (!P.img) return;
+  try { pc.setPointerCapture(e.pointerId); } catch {}
+  const q = pXY(e); pp.set(e.pointerId, q);
+  if (pp.size === 2) {
+    const [a, b] = [...pp.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    pg = { type: 'pinch', d0: d, s0: P.scale, ip: toImgP(cx, cy) };
+  } else if (pp.size === 1) {
+    const hit = pHit(q.x, q.y);
+    pg = hit ? { type: 'drag', hit, x0: q.x, y0: q.y } : { type: 'pan', x0: q.x, y0: q.y, ox0: P.ox, oy0: P.oy, moved: false };
+  }
+});
+pc.addEventListener('pointermove', e => {
+  if (!pp.has(e.pointerId) || !pg) return;
+  const q = pXY(e); pp.set(e.pointerId, q);
+  if (pg.type === 'pinch' && pp.size === 2) {
+    const [a, b] = [...pp.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    P.scale = Math.min(60, Math.max(0.05, pg.s0 * d / pg.d0));
+    P.ox = cx - pg.ip.x * P.scale; P.oy = cy - pg.ip.y * P.scale;
+  } else if (pg.type === 'pan' && pp.size === 1) {
+    if (Math.hypot(q.x - pg.x0, q.y - pg.y0) > 8) pg.moved = true;
+    if (pg.moved) { P.ox = pg.ox0 + q.x - pg.x0; P.oy = pg.oy0 + q.y - pg.y0; }
+  } else if (pg.type === 'drag' && pp.size === 1) {
+    pg.moved = true;
+    const ip = toImgP(q.x, q.y), h = pg.hit;
+    if (h.arr) { h.arr[h.i] = ip; pRecalc(); } else if (h.obj) h.obj[h.k] = ip; else P.pending = ip;
+  }
+  pDraw();
+});
+function pEnd(e) {
+  if (!pp.has(e.pointerId)) return;
+  const q = pXY(e), g = pg; pp.delete(e.pointerId);
+  if (pp.size === 0) { pg = null; if (g && g.type === 'pan' && !g.moved && e.type === 'pointerup') pTap(q.x, q.y); }
+  else if (g && g.type === 'pinch') pg = null;
+}
+pc.addEventListener('pointerup', pEnd);
+pc.addEventListener('pointercancel', pEnd);
+pc.addEventListener('wheel', e => {
+  if (!P.img) return; e.preventDefault();
+  const q = pXY(e), ip = toImgP(q.x, q.y);
+  P.scale = Math.min(60, Math.max(0.05, P.scale * Math.pow(1.0015, -e.deltaY)));
+  P.ox = q.x - ip.x * P.scale; P.oy = q.y - ip.y * P.scale; pDraw();
+}, { passive: false });
+
+function pOpen(on) {
+  P.visible = on; $('photo').style.display = on ? 'flex' : 'none';
+  if (on) { pResize(); pFit(); pDraw(); }
+}
+$('bPhoto').onclick = () => pOpen(true);
+$('pBack').onclick = () => { pOpen(false); invalidate(); };
+addEventListener('resize', () => { if (P.visible) { pResize(); pFit(); pDraw(); } });
+$('pFile').addEventListener('change', async e => {
+  const f = e.target.files[0]; if (!f) return;
+  try {
+    P.img = await createImageBitmap(f);
+    P.dims = []; P.calPts = []; P.calMode = null; P.cal = null; P.map = null; P.pending = null;
+    pFit(); pDraw();
+  } catch { $('pMsg').textContent = 'Không đọc được ảnh này. Hãy thử ảnh JPG hoặc PNG.'; }
+  e.target.value = '';
+});
+$('pCal').onclick = () => { if (P.img) $('pCalPick').style.display = 'block'; };
+$('pcCancel').onclick = () => { $('pCalPick').style.display = 'none'; };
+function pStartCal(mode) { $('pCalPick').style.display = 'none'; P.calMode = mode; P.calPts = []; P.cal = null; P.map = null; P.pending = null; pDraw(); }
+$('pcLine').onclick = () => pStartCal('line');
+$('pcRect').onclick = () => pStartCal('rect');
+$('pUnit').onclick = () => setUnit({ cm: 'mm', mm: 'm', m: 'cm' }[unit]);
+$('pUndo').onclick = () => {
+  if (P.pending) P.pending = null;
+  else if (P.calMode && P.calPts.length) P.calPts.pop();
+  else if (P.calMode) P.calMode = null;
+  else if (P.dims.length) P.dims.pop();
+  pDraw();
+};
+$('pSave').onclick = () => {
+  if (!P.img) return;
+  const c = document.createElement('canvas'); c.width = P.img.width; c.height = P.img.height;
+  const x = c.getContext('2d'); x.drawImage(P.img, 0, 0);
+  drawNotes(x, { scale: 1, ox: 0, oy: 0 }, Math.max(1, Math.min(c.width, c.height) / 650), false);
+  c.toBlob(async b => {
+    const file = new File([b], 'anh-do.png', { type: 'image/png' });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {       // điện thoại: mở bảng chia sẻ / lưu vào Ảnh
+      try { await navigator.share({ files: [file] }); return; } catch (err) { if (err.name === 'AbortError') return; }
+    }
+    download('anh-do.png', b);
+  });
+};
 
 // ---------- loop ----------
 // Chỉ vẽ lại khi có thay đổi (xoay/zoom/chạm/đo) để máy không nóng và không giật
