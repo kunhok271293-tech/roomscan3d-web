@@ -47,6 +47,8 @@
   #toast { display:none; position:absolute; left:10px; right:10px; top:60px; z-index:7; background:rgba(20,20,20,.92); color:#fff;
     border:1px solid var(--line); border-radius:8px; padding:10px 12px; font-size:13px; pointer-events:none; }
   #toast.bad { border-color:#ff2d20; color:#ff8a80; }
+  #loupe { display:none; position:absolute; top:66px; width:130px; height:130px; border-radius:50%; border:2px solid #fff;
+    box-shadow:0 4px 16px rgba(0,0,0,.6); z-index:6; pointer-events:none; background:#111; }
   #bottom { display:none; }
   /* Giao diện điện thoại / máy tính bảng */
   .touch #app { height:100dvh; }
@@ -104,6 +106,7 @@
         <button id="askCancel">Huỷ</button>
       </div>
     </div>
+    <canvas id="loupe" width="260" height="260"></canvas>
     <div id="toast"></div>
     <div id="drop">Thả file .obj / .usdz / .glb / .ply / .stl vào đây</div>
   </div>
@@ -143,9 +146,8 @@ let dirty = true, lastRender = 0;      // vẽ lại khi cần (xem hàm loop)
 function invalidate() { dirty = true; }
 
 // ---------- scene ----------
-const isCoarse = matchMedia('(pointer:coarse)').matches;
-const renderer = new THREE.WebGLRenderer({ antialias: !isCoarse, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(devicePixelRatio, matchMedia('(pointer:coarse)').matches ? 1.5 : 2));
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 view.prepend(renderer.domElement);
 const labelRenderer = new CSS2DRenderer({ element: $('labels') });
 
@@ -157,14 +159,12 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = false;   // thả tay là dừng ngay, không trượt thêm
 controls.zoomToCursor = true;     // zoom vào đúng chỗ đang trỏ để chọn điểm chính xác
 controls.minDistance = 0.05;
-// Điện thoại: lúc đang xoay/zoom hạ độ phân giải xuống 1x cho mượt, dừng tay 0,2 giây thì trả lại nét
-const baseDPR = Math.min(devicePixelRatio, isCoarse ? 1.5 : 2);
-let lowRes = false, restoreTimer = 0;
-controls.addEventListener('change', () => {
-  if (!isCoarse) return;
-  if (!lowRes) { lowRes = true; renderer.setPixelRatio(1); }
-  clearTimeout(restoreTimer);
-  restoreTimer = setTimeout(() => { lowRes = false; renderer.setPixelRatio(baseDPR); invalidate(); }, 220);
+// Sau mỗi lần zoom/di chuyển, lấy điểm trên mô hình ngay giữa màn hình làm tâm xoay.
+// Camera không đổi hướng (điểm đó nằm đúng trên tia nhìn giữa màn hình), nhưng xoay về sau sẽ quay quanh vật thể.
+controls.addEventListener('end', () => {
+  raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+  const h = raycaster.intersectObjects(modelGroup.children, true)[0];
+  if (h) controls.target.copy(h.point);
 });
 scene.add(new THREE.HemisphereLight(0xffffff, 0x555566, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
@@ -436,17 +436,14 @@ if (touchMode) document.documentElement.classList.add('touch');
 
 view.addEventListener('pointermove', ev => {
   if (!touchMode) hover(ev);
-  else if (g && pts.size === 1) {
-    if (Math.hypot(ev.clientX - g.x, ev.clientY - g.y) > 8) g.dragged = true;
-    hover(g.dragged ? off(ev) : ev);
-  }
+  else if (g && pts.size === 1) { hover(off(ev)); placeLoupe(ev); }
 });
 function hover(ev) {
   if (!measureOn) return;
   const h = pick(ev);
   if (!h) { cursor.visible = false; liveLine.visible = false; liveLabel.visible = false; return; }
   const p = applyLock(h.p);
-  cursor.position.copy(p); cursor.visible = true;
+  cursor.position.copy(p); cursor.visible = true; lastKind = h.kind;
   cursor.material.color.set(h.kind === 'vertex' ? 0x00e676 : h.kind === 'edge' ? 0xffab00 : 0x00e5ff);
   if (first) {
     liveLine.geometry.setFromPoints([first, p]); liveLine.visible = true;
@@ -455,16 +452,42 @@ function hover(ev) {
   }
 }
 
-// Trên điện thoại: chạm giữ điểm 1 → kéo ngón tay sang điểm 2 → thả ra. Dấu chấm hiện cao hơn ngón tay
-// một đoạn để ngón không che điểm. Chạm 1 lần rồi chạm lần nữa cũng được. Hai ngón: di chuyển/zoom.
+// Trên điện thoại: GIỮ ngón tay → điểm bắt hiện cao hơn ngón một đoạn kèm kính lúp, kéo để chỉnh, THẢ TAY để chốt.
+// Làm vậy cho điểm 1, dùng hai ngón di chuyển/zoom, rồi làm tiếp cho điểm 2.
 const OFFSET = 70, pts = new Set();
-let g = null;
+let g = null, lastKind = 'face';
+
+// Kính lúp: phóng to vùng quanh điểm bắt để thấy rõ chấm có nằm đúng góc không
+const loupe = $('loupe'), lctx = loupe.getContext('2d');
+const LOUPE_CSS = 130, LOUPE_ZOOM = 3.5;
+let loupeOn = false;
+function placeLoupe(ev) {
+  const r = view.getBoundingClientRect();
+  loupe.style.display = 'block'; loupeOn = true;
+  loupe.style.top = '66px';
+  loupe.style.left = (ev.clientX - r.left < r.width / 2) ? 'auto' : '10px';
+  loupe.style.right = (ev.clientX - r.left < r.width / 2) ? '10px' : 'auto';
+}
+function hideLoupe() { loupeOn = false; loupe.style.display = 'none'; }
+const KIND_TEXT = { vertex: 'GÓC / ĐỈNH', edge: 'CẠNH', face: 'MẶT' };
+function drawLoupe() {
+  if (!loupeOn || !cursor.visible) return;
+  const dpr = renderer.getPixelRatio(), src = LOUPE_CSS / LOUPE_ZOOM, sp = toScreen(cursor.position);
+  lctx.clearRect(0, 0, loupe.width, loupe.height);
+  lctx.drawImage(renderer.domElement, (sp.x - src / 2) * dpr, (sp.y - src / 2) * dpr, src * dpr, src * dpr, 0, 0, loupe.width, loupe.height);
+  const c = loupe.width / 2;
+  lctx.strokeStyle = 'rgba(255,255,255,.9)'; lctx.lineWidth = 1.5;
+  lctx.beginPath(); lctx.moveTo(c, c - 26); lctx.lineTo(c, c + 26); lctx.moveTo(c - 26, c); lctx.lineTo(c + 26, c); lctx.stroke();
+  lctx.fillStyle = 'rgba(0,0,0,.65)'; lctx.fillRect(0, loupe.height - 30, loupe.width, 30);
+  lctx.fillStyle = lastKind === 'vertex' ? '#00e676' : lastKind === 'edge' ? '#ffab00' : '#00e5ff';
+  lctx.font = 'bold 20px system-ui'; lctx.textAlign = 'center'; lctx.fillText(KIND_TEXT[lastKind] || '', c, loupe.height - 8);
+}
 const off = ev => ({ clientX: ev.clientX, clientY: ev.clientY - OFFSET });
 const hideLive = () => { liveLine.visible = false; liveLabel.visible = false; };
 const firstMarker = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color:0xff1f1f, depthTest:false }));
 firstMarker.userData.px = 3.5; firstMarker.renderOrder = 10; firstMarker.visible = false; scene.add(firstMarker); markers.push(firstMarker);
-const HINT_IDLE = 'Chạm điểm 1, rồi chạm điểm 2 (hoặc chạm giữ điểm 1 và kéo sang điểm 2). Hai ngón: di chuyển/zoom. Muốn xoay: bấm nút "Đang đo".';
-const HINT_FIRST = 'Đã chọn điểm 1. Dùng hai ngón di chuyển/zoom tới điểm 2 rồi chạm vào điểm đó.';
+const HINT_IDLE = 'Giữ ngón tay để ngắm điểm (có kính lúp), kéo để chỉnh, thả tay để chốt điểm 1. Hai ngón: di chuyển/zoom. Muốn xoay: bấm nút "Đo".';
+const HINT_FIRST = 'Đã chọn điểm 1. Zoom/di chuyển bằng hai ngón tới điểm 2, rồi giữ ngón tay ngắm điểm, thả tay để chốt.';
 let hintFirst = null, hintHideAt = Date.now() + 9000;
 function syncFirstMarker() {
   firstMarker.visible = !!first; if (first) firstMarker.position.copy(first);
@@ -477,30 +500,24 @@ function syncFirstMarker() {
 view.addEventListener('pointerdown', ev => {
   if (!touchMode || ev.pointerType === 'mouse' || ev.target.closest('#toolbar,#bottom,#ask,#side')) return;
   pts.add(ev.pointerId);
-  if (pts.size > 1) { if (g && !g.hadFirst) first = null; g = null; hideLive(); cursor.visible = false; return; }
+  if (pts.size > 1) { g = null; hideLive(); hideLoupe(); cursor.visible = false; return; }   // hai ngón = di chuyển/zoom
   if (!measureOn || askCtx) return;
-  g = { x: ev.clientX, y: ev.clientY, hadFirst: !!first };
-  if (!first) {
-    const h = pick(ev);               // điểm 1 = đúng chỗ ngón chạm
-    if (!h) { g = null; return; }
-    first = h.p.clone();
-  }
-  hover(ev);
+  g = { x: ev.clientX, y: ev.clientY };
+  hover(off(ev)); placeLoupe(ev);
 });
 function endTouch(ev) {
   if (!touchMode || ev.pointerType === 'mouse') return;
   pts.delete(ev.pointerId);
   if (!g) return;
-  const gg = g; g = null;
+  g = null; hideLoupe();
   cursor.visible = false;
-  if (ev.type === 'pointercancel') { if (!gg.hadFirst) first = null; hideLive(); return; }
-  const moved = Math.hypot(ev.clientX - gg.x, ev.clientY - gg.y);
-  if (!gg.hadFirst && moved < 8) { hideLive(); return; }   // chạm 1 lần: giữ điểm 1, chạm tiếp để chọn điểm 2
-  const h = pick(gg.dragged ? off(ev) : ev);   // chạm nhẹ: đúng chỗ ngón; kéo: dấu chấm cao hơn ngón
-  const p = h && first ? applyLock(h.p) : null;
-  if (p && first.distanceTo(p) > 1e-4) { const a = first; first = null; hideLive(); ask(a, p.clone()); }
-  else if (!gg.hadFirst) { first = null; hideLive(); }
-  else hideLive();
+  if (ev.type === 'pointercancel') { hideLive(); return; }
+  const h = pick(off(ev));
+  if (!h) { hideLive(); return; }
+  const p = applyLock(h.p);
+  if (!first) { first = p.clone(); hideLive(); return; }
+  const a = first; first = null; hideLive();
+  if (a.distanceTo(p) > 1e-4) ask(a, p.clone());
 }
 view.addEventListener('pointerup', endTouch);
 view.addEventListener('pointercancel', endTouch);
@@ -732,6 +749,7 @@ function loop(now = 0) {
     scaleMarkers();
     renderer.render(scene, camera);
     labelRenderer.render(scene, camera);
+    drawLoupe();
     dirty = false; lastRender = now;
   }
   requestAnimationFrame(loop);
