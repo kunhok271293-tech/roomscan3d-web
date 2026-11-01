@@ -129,6 +129,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
+import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from './lib/three-mesh-bvh.js';
 
 // BVH: bắn tia nhanh hơn rất nhiều trên lưới LiDAR hàng trăm nghìn tam giác
@@ -142,7 +143,8 @@ let dirty = true, lastRender = 0;      // vẽ lại khi cần (xem hàm loop)
 function invalidate() { dirty = true; }
 
 // ---------- scene ----------
-const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
+const isCoarse = matchMedia('(pointer:coarse)').matches;
+const renderer = new THREE.WebGLRenderer({ antialias: !isCoarse, powerPreference: 'high-performance' });
 renderer.setPixelRatio(Math.min(devicePixelRatio, matchMedia('(pointer:coarse)').matches ? 1.5 : 2));
 view.prepend(renderer.domElement);
 const labelRenderer = new CSS2DRenderer({ element: $('labels') });
@@ -155,6 +157,15 @@ const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 controls.zoomToCursor = true;     // zoom vào đúng chỗ đang trỏ để chọn điểm chính xác
 controls.minDistance = 0.05;
+// Điện thoại: lúc đang xoay/zoom hạ độ phân giải xuống 1x cho mượt, dừng tay 0,2 giây thì trả lại nét
+const baseDPR = Math.min(devicePixelRatio, isCoarse ? 1.5 : 2);
+let lowRes = false, restoreTimer = 0;
+controls.addEventListener('change', () => {
+  if (!isCoarse) return;
+  if (!lowRes) { lowRes = true; renderer.setPixelRatio(1); }
+  clearTimeout(restoreTimer);
+  restoreTimer = setTimeout(() => { lowRes = false; renderer.setPixelRatio(baseDPR); invalidate(); }, 220);
+});
 scene.add(new THREE.HemisphereLight(0xffffff, 0x555566, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(3, 8, 5);
@@ -189,6 +200,11 @@ function setModel(obj) {
   modelGroup.updateMatrixWorld(true);
   obj.traverse(o => {
     if (o.isMesh) {
+      // Lưới OBJ thường tách đỉnh theo từng tam giác (gấp ~6 lần). Gộp đỉnh trùng để nhẹ GPU hơn nhiều.
+      if (!o.geometry.index && o.geometry.attributes.position.count > 30000) {
+        o.geometry.deleteAttribute('normal'); o.geometry.deleteAttribute('uv');
+        o.geometry = mergeVertices(o.geometry, 1e-5);
+      }
       if (!o.geometry.attributes.normal) o.geometry.computeVertexNormals();
       const m = Array.isArray(o.material) ? o.material[0] : o.material;
       if (!m || !m.map) o.material = meshMat();
@@ -227,6 +243,8 @@ function demoRoom() {
 async function loadFile(file) {
   const ext = file.name.split('.').pop().toLowerCase();
   currentName = file.name;
+  toast('Đang đọc file ' + file.name + '… (file lớn có thể mất vài giây)');
+  await new Promise(r => setTimeout(r, 30));      // cho trình duyệt kịp hiện thông báo
   try {
     let obj;
     if (ext === 'obj') obj = new OBJLoader().parse(await file.text());
@@ -294,6 +312,77 @@ function toScreen(v) {
   return new THREE.Vector2((p.x + 1) / 2 * r.width, (1 - p.y) / 2 * r.height);
 }
 
+// Bám góc/cạnh bằng MẶT PHẲNG: lưới LiDAR hiếm khi có đỉnh đúng ở góc tường, nên ta lấy các tam giác quanh
+// con trỏ, gom thành tối đa 3 mặt phẳng (tường/sàn/trần), rồi tính giao điểm (góc) hoặc giao tuyến (cạnh).
+const _sph = new THREE.Sphere(), _inv = new THREE.Matrix4();
+const _a = new THREE.Vector3(), _b = new THREE.Vector3(), _c = new THREE.Vector3(), _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+function featureSnap(hit) {
+  const mesh = hit.object, bvh = mesh.geometry.boundsTree;
+  if (!bvh) return null;
+  const k = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / (renderer.domElement.clientHeight || 1);
+  const R = THREE.MathUtils.clamp(camera.position.distanceTo(hit.point) * k * 24, 0.015, 0.6);   // ~24 px, tính bằng mét
+  _inv.copy(mesh.matrixWorld).invert();
+  _sph.center.copy(hit.point).applyMatrix4(_inv);
+  _sph.radius = R / (mesh.matrixWorld.getMaxScaleOnAxis() || 1);
+  const tris = []; let totalArea = 0;
+  bvh.shapecast({
+    intersectsBounds: box => _sph.intersectsBox(box),
+    intersectsTriangle: tri => {
+      _a.copy(tri.a).applyMatrix4(mesh.matrixWorld); _b.copy(tri.b).applyMatrix4(mesh.matrixWorld); _c.copy(tri.c).applyMatrix4(mesh.matrixWorld);
+      const cen = _a.clone().add(_b).add(_c).multiplyScalar(1 / 3);
+      if (cen.distanceTo(hit.point) > R * 1.3) return false;
+      const n = _e1.subVectors(_b, _a).cross(_e2.subVectors(_c, _a));
+      const area = n.length() / 2;
+      if (area < 1e-9) return false;
+      tris.push({ n: n.clone().normalize(), cen, area }); totalArea += area;
+      return tris.length > 3000;      // true = dừng duyệt
+    },
+  });
+  if (tris.length < 3) return null;
+
+  // gom các tam giác cùng hướng (lệch < 25°) thành mặt phẳng, mặt lớn nhất trước
+  tris.sort((x, y) => y.area - x.area);
+  let rest = tris; const planes = [];
+  for (let it = 0; it < 3 && rest.length; it++) {
+    let N = rest[0].n.clone(), mem = [];
+    for (let r = 0; r < 3; r++) {
+      mem = rest.filter(t => Math.abs(t.n.dot(N)) > 0.906);
+      const sum = new THREE.Vector3();
+      for (const t of mem) sum.addScaledVector(t.n, t.area * (t.n.dot(N) < 0 ? -1 : 1));
+      if (sum.lengthSq() > 0) N = sum.normalize();
+    }
+    let area = 0; const P = new THREE.Vector3();
+    for (const t of mem) { area += t.area; P.addScaledVector(t.cen, t.area); }
+    if (area < totalArea * 0.12) break;
+    planes.push({ N, P: P.multiplyScalar(1 / area), d: 0, area });
+    planes[planes.length - 1].d = N.dot(planes[planes.length - 1].P);
+    const set = new Set(mem); rest = rest.filter(t => !set.has(t));
+  }
+  if (planes.length < 2) return null;
+
+  if (planes.length >= 3) {          // góc = giao điểm của 3 mặt phẳng
+    const [p1, p2, p3] = planes;
+    const c23 = new THREE.Vector3().crossVectors(p2.N, p3.N), c31 = new THREE.Vector3().crossVectors(p3.N, p1.N), c12 = new THREE.Vector3().crossVectors(p1.N, p2.N);
+    const det = p1.N.dot(c23);
+    if (Math.abs(det) > 0.25) {
+      const P = c23.multiplyScalar(p1.d).add(c31.multiplyScalar(p2.d)).add(c12.multiplyScalar(p3.d)).multiplyScalar(1 / det);
+      if (P.distanceTo(hit.point) < R * 1.4) return { p: P, kind: 'vertex' };
+    }
+  }
+  // cạnh = giao tuyến của 2 mặt phẳng, chiếu con trỏ lên đường đó
+  for (let i = 0; i < planes.length; i++) for (let j = i + 1; j < planes.length; j++) {
+    const p1 = planes[i], p2 = planes[j];
+    const D = new THREE.Vector3().crossVectors(p1.N, p2.N), l2 = D.lengthSq();
+    if (l2 < 0.25) continue;                           // hai mặt gần song song (< 30°)
+    const P0 = new THREE.Vector3().crossVectors(p2.N, D).multiplyScalar(p1.d)
+      .add(new THREE.Vector3().crossVectors(D, p1.N).multiplyScalar(p2.d)).multiplyScalar(1 / l2);
+    const Dn = D.normalize();
+    const P = P0.addScaledVector(Dn, hit.point.clone().sub(P0).dot(Dn));
+    if (P.distanceTo(hit.point) < R) return { p: P, kind: 'edge' };
+  }
+  return null;
+}
+
 function pick(ev) {
   const r = renderer.domElement.getBoundingClientRect();
   const mx = ev.clientX - r.left, my = ev.clientY - r.top;
@@ -302,7 +391,10 @@ function pick(ev) {
   const hit = raycaster.intersectObjects(modelGroup.children, true).find(h => h.face);
   if (!hit) return null;
   let p = hit.point.clone(), kind = 'face';
-  if (snapOn) {
+  if (snapOn) { const f = featureSnap(hit); if (f) return f; }
+  // Lưới LiDAR thô (hàng trăm nghìn tam giác): chỉ bám góc/cạnh bằng mặt phẳng ở trên; lưới sạch mới bám đỉnh tam giác
+  const geoOf = hit.object.geometry;
+  if (snapOn && (geoOf.index ? geoOf.index.count : geoOf.attributes.position.count) / 3 < 20000) {
     const mesh = hit.object, pos = mesh.geometry.attributes.position;
     const vs = [hit.face.a, hit.face.b, hit.face.c].map(i =>
       new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld));
