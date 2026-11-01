@@ -157,7 +157,10 @@
     <h3>Kích thước đã đo (<span id="count">0</span>)</h3>
     <div id="list"></div>
     <div id="foot">
-      <button id="bSaveJson" title="Sao lưu số đo ra file, không sợ mất khi xoá dữ liệu trình duyệt">Lưu số đo</button>
+      <button id="bSaveProj" class="on" title="Lưu mô hình + số đo + chi tiết vào MỘT file để mở lại sau">💾 Lưu dự án</button>
+      <label class="btn" title="Mở file dự án đã lưu (.do3d)">📂 Mở dự án<input id="projIn" type="file" hidden></label>
+      <button id="bObj" title="Xuất mô hình OBJ đã chỉnh tỉ lệ (đơn vị mét) để đưa vào SketchUp hoặc phần mềm thiết kế">Xuất OBJ</button>
+      <button id="bSaveJson" title="Chỉ lưu số đo (nhẹ), cần có sẵn file mô hình">Lưu số đo</button>
       <label class="btn">Mở số đo<input id="jsonIn" type="file" accept=".json" hidden></label>
       <button id="bCsv">Xuất CSV</button>
       <button id="bPng">Ảnh PNG</button>
@@ -202,6 +205,7 @@ import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
+import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from './lib/three-mesh-bvh.js';
 
 // BVH: bắn tia nhanh hơn rất nhiều trên lưới LiDAR hàng trăm nghìn tam giác
@@ -325,6 +329,7 @@ async function loadFile(file) {
     else if (ext === 'stl') obj = new THREE.Mesh(new STLLoader().parse(await file.arrayBuffer()));
     else throw new Error('Định dạng không hỗ trợ');
     setModel(obj);
+    srcModel = { name: file.name, ext, file };      // giữ file gốc để đóng gói vào "Lưu dự án"
     let meshes = 0, tris = 0;
     modelGroup.traverse(o => { if (o.isMesh) { meshes++; const g = o.geometry; tris += (g.index ? g.index.count : g.attributes.position.count) / 3; } });
     const box = new THREE.Box3().setFromObject(modelGroup), s = box.getSize(new THREE.Vector3());
@@ -334,7 +339,8 @@ async function loadFile(file) {
       toast(file.name + ': ' + meshes + ' khối, ' + Math.round(tris) + ' tam giác, kích thước ' +
         s.x.toFixed(2) + ' × ' + s.y.toFixed(2) + ' × ' + s.z.toFixed(2) + ' m');
     }
-  } catch (e) { toast('Không đọc được file: ' + e.message, true); }
+    return true;
+  } catch (e) { toast('Không đọc được file: ' + e.message, true); return false; }
 }
 let toastTimer;
 function toast(msg, bad = false) {
@@ -352,6 +358,7 @@ addEventListener('drop', e => {
 
 // ---------- measuring ----------
 let currentName = 'phong-mau';
+let srcModel = null;      // file mô hình gốc đang mở (null với phòng mẫu)
 let unit = 'cm', snapOn = true, measureOn = true, axisLock = 'auto';
 let dims = [];          // {a,b,group,label}
 let first = null;       // điểm đầu đang chờ điểm thứ hai
@@ -877,18 +884,97 @@ $('jsonIn').addEventListener('change', async e => {
   } catch (err) { alert('File số đo không hợp lệ'); }
   e.target.value = '';
 });
+// ---------- lưu / mở dự án: mô hình + số đo + chi tiết trong MỘT file (.do3d) ----------
+function toB64(buf) {
+  let s = ''; const u = new Uint8Array(buf), CH = 0x8000;
+  for (let i = 0; i < u.length; i += CH) s += String.fromCharCode.apply(null, u.subarray(i, i + CH));
+  return btoa(s);
+}
+function fromB64(b64) { const s = atob(b64), u = new Uint8Array(s.length); for (let i = 0; i < s.length; i++) u[i] = s.charCodeAt(i); return u; }
+async function gzipBlob(str) {
+  if (typeof CompressionStream === 'undefined') return new Blob([str]);
+  return await new Response(new Blob([str]).stream().pipeThrough(new CompressionStream('gzip'))).blob();
+}
+async function readMaybeGz(blob) {
+  const head = new Uint8Array(await blob.slice(0, 2).arrayBuffer());
+  if (head[0] === 0x1f && head[1] === 0x8b) {
+    if (typeof DecompressionStream === 'undefined') throw new Error('trình duyệt chưa hỗ trợ giải nén');
+    return await new Response(blob.stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  }
+  return await blob.text();
+}
+async function saveFile(name, blob) {          // điện thoại: bảng chia sẻ (Lưu vào Tệp); máy tính: tải xuống
+  const f = new File([blob], name, { type: blob.type || 'application/octet-stream' });
+  if (navigator.canShare && navigator.canShare({ files: [f] })) {
+    try { await navigator.share({ files: [f] }); return; } catch (e) { if (e.name === 'AbortError') return; }
+  }
+  download(name, blob);
+}
+const baseName = () => currentName.replace(/\.[^.]+$/, '');
+$('bSaveProj').onclick = async () => {
+  toast('Đang đóng gói dự án…'); await new Promise(r => setTimeout(r, 30));
+  try {
+    const data = { app: 'do3d', v: 1, name: currentName, savedAt: new Date().toISOString(), scale: modelGroup.scale.x, unit,
+      dims: dims.map(d => ({ a: d.a.toArray(), b: d.b.toArray(), real: d.real })), features: features.map(featSpec), model: null };
+    if (srcModel) {
+      data.model = { name: srcModel.name, ext: srcModel.ext };
+      if (srcModel.ext === 'obj' || srcModel.ext === 'gltf') data.model.text = await srcModel.file.text();
+      else data.model.b64 = toB64(await srcModel.file.arrayBuffer());
+    }
+    const blob = await gzipBlob(JSON.stringify(data));
+    await saveFile(baseName() + '.do3d', blob);
+    toast('Đã đóng gói dự án (' + (blob.size / 1048576).toFixed(1) + ' MB). Mở lại bằng nút "Mở dự án".' + (srcModel ? '' : ' (Đang là phòng mẫu, chưa có mô hình thật.)'));
+  } catch (e) { toast('Không lưu được dự án: ' + e.message, true); }
+};
+$('projIn').addEventListener('change', async e => {
+  const f = e.target.files[0]; e.target.value = ''; if (!f) return;
+  try {
+    const data = JSON.parse(await readMaybeGz(f));
+    if (data.model) {
+      const body = data.model.text !== undefined ? data.model.text : fromB64(data.model.b64);
+      if (!(await loadFile(new File([body], data.model.name)))) return;
+    }
+    clearDims(false); clearFeatures(false);
+    modelGroup.scale.setScalar(data.scale || 1); modelGroup.updateMatrixWorld(true);
+    for (const d of data.dims || []) addDim(new THREE.Vector3(...d.a), new THREE.Vector3(...d.b), d.real ?? null, false);
+    for (const s of data.features || []) addFeature(featFromSpec(s), false);
+    if (data.unit) setUnit(data.unit);
+    try { localStorage.setItem('scale:' + currentName, String(modelGroup.scale.x)); } catch {}
+    fit(); refresh(true);
+    toast('Đã mở dự án: ' + (data.dims || []).length + ' số đo, ' + (data.features || []).length + ' chi tiết.');
+  } catch (err) { toast('Không mở được file dự án: ' + err.message, true); }
+});
+// OBJ đã chỉnh tỉ lệ (mét) kèm các chi tiết (ổ điện, ô gió…) dạng tấm phẳng, để đưa vào phần mềm thiết kế
+$('bObj').onclick = async () => {
+  toast('Đang xuất OBJ…'); await new Promise(r => setTimeout(r, 30));
+  try {
+    modelGroup.updateMatrixWorld(true);
+    let txt = new OBJExporter().parse(modelGroup);
+    let n = (txt.match(/^v /gm) || []).length, extra = '';
+    const names = { outlet: 'o_dien', switch: 'cong_tac', vent: 'o_gio', other: 'chi_tiet' };
+    features.forEach((f, i) => {
+      extra += `o ${names[f.type] || 'chi_tiet'}_${i + 1}_${mm(f.w)}x${mm(f.h)}\n`;
+      f.pts.slice(1).forEach(p => { extra += `v ${p.x} ${p.y} ${p.z}\n`; });
+      extra += `f ${n + 1} ${n + 2} ${n + 3} ${n + 4}\n`; n += 4;
+    });
+    await saveFile(baseName() + '-tilemet.obj', new Blob([txt + (txt.endsWith('\n') ? '' : '\n') + extra], { type: 'text/plain' }));
+    toast('Đã xuất OBJ (đơn vị mét, đã chỉnh tỉ lệ' + (features.length ? ', kèm ' + features.length + ' chi tiết' : '') + '). Trong SketchUp chọn đơn vị Meters.');
+  } catch (e) { toast('Không xuất được OBJ: ' + e.message, true); }
+};
+
 $('bCsv').onclick = () => {
-  const rows = ['STT,Số đo (mm),Nguồn,Số quét (mm),Lệch quét-thật (mm)'];
+  const P3 = v => [v.x, v.y, v.z].map(x => x.toFixed(4)).join(',');
+  const rows = ['STT,Số đo (mm),Nguồn,Số quét (mm),Lệch quét-thật (mm),Điểm A x,y,z (m),,,Điểm B x,y,z (m),,'];
   dims.forEach((d, i) => {
     const S = Math.round(d.a.distanceTo(d.b) * 1000);
     rows.push([i + 1, Math.round(valueOf(d) * 1000), d.real == null ? 'quét' : 'đo thật', S,
-      d.real == null ? '' : S - Math.round(d.real * 1000)].join(','));
+      d.real == null ? '' : S - Math.round(d.real * 1000), P3(d.a), P3(d.b)].join(','));
   });
   if (features.length) {
     const floorY = new THREE.Box3().setFromObject(modelGroup).min.y;   // điểm thấp nhất của mô hình, xấp xỉ mặt sàn
-    rows.push('', 'Chi tiết,Loại,Rộng (mm),Cao (mm),Ghi chú,Tâm cao hơn điểm thấp nhất mô hình (mm)');
+    rows.push('', 'Chi tiết,Loại,Rộng (mm),Cao (mm),Ghi chú,Tâm cao hơn điểm thấp nhất mô hình (mm),Tâm x,y,z (m),,');
     features.forEach((f, i) => rows.push([i + 1, (FEAT_TYPES[f.type] || FEAT_TYPES.other).name, mm(f.w), mm(f.h),
-      '"' + (f.note || '').replace(/"/g, '""') + '"', Math.round((f.c.y - floorY) * 1000)].join(',')));
+      '"' + (f.note || '').replace(/"/g, '""') + '"', Math.round((f.c.y - floorY) * 1000), P3(f.c)].join(',')));
   }
   download('kich-thuoc.csv', new Blob(['﻿' + rows.join('\n')], { type:'text/csv' }));
 };
