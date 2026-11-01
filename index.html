@@ -54,6 +54,7 @@
   .touch #bottom { display:flex; position:absolute; left:10px; right:10px; bottom:calc(10px + env(safe-area-inset-bottom)); gap:8px; }
   .touch #bottom button { min-height:50px; font-size:16px; }
   .touch #bTool { flex:1; font-weight:700; }
+  .touch #bUnit { font-size:14px; white-space:nowrap; }
   .touch #toolbar { flex-wrap:nowrap; overflow-x:auto; right:10px; padding-bottom:2px; }
   .touch #toolbar > * { flex:none; min-height:40px; }
   .touch #side { position:absolute; left:0; right:0; bottom:0; top:auto; width:auto; height:60%; border-left:0;
@@ -89,6 +90,7 @@
     <div id="hint">Bấm 2 điểm → nhập số đo thật (thước/laser) → nhãn dim hiện số thật. Bám điểm tự hút vào đỉnh/cạnh. Esc: huỷ · Ctrl+Z: hoàn tác · A/X/Y/Z: khoá trục</div>
     <div id="bottom">
       <button id="bUndo" title="Hoàn tác">↶</button>
+      <button id="bUnit" title="Đổi đơn vị: cm → mm → m">Đơn vị: cm</button>
       <button id="bTool" class="on">📏 Đo</button>
       <button id="bList">☰ Danh sách (<span id="count2">0</span>)</button>
     </div>
@@ -127,13 +129,21 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { PLYLoader } from 'three/addons/loaders/PLYLoader.js';
 import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
+import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from './lib/three-mesh-bvh.js';
+
+// BVH: bắn tia nhanh hơn rất nhiều trên lưới LiDAR hàng trăm nghìn tam giác
+THREE.BufferGeometry.prototype.computeBoundsTree = computeBoundsTree;
+THREE.BufferGeometry.prototype.disposeBoundsTree = disposeBoundsTree;
+THREE.Mesh.prototype.raycast = acceleratedRaycast;
 
 const $ = id => document.getElementById(id);
 const view = $('view');
+let dirty = true, lastRender = 0;      // vẽ lại khi cần (xem hàm loop)
+function invalidate() { dirty = true; }
 
 // ---------- scene ----------
 const renderer = new THREE.WebGLRenderer({ antialias:true, preserveDrawingBuffer:true });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(devicePixelRatio, matchMedia('(pointer:coarse)').matches ? 1.5 : 2));
 view.prepend(renderer.domElement);
 const labelRenderer = new CSS2DRenderer({ element: $('labels') });
 
@@ -143,6 +153,8 @@ const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 1000);
 camera.position.set(6, 5, 6);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
+controls.zoomToCursor = true;     // zoom vào đúng chỗ đang trỏ để chọn điểm chính xác
+controls.minDistance = 0.05;
 scene.add(new THREE.HemisphereLight(0xffffff, 0x555566, 1.6));
 const sun = new THREE.DirectionalLight(0xffffff, 1.2);
 sun.position.set(3, 8, 5);
@@ -165,7 +177,7 @@ function resize() {
 addEventListener('resize', resize);
 
 // ---------- model loading ----------
-const meshMat = () => new THREE.MeshStandardMaterial({ color:0xc9ccd1, side:THREE.DoubleSide, flatShading:true, roughness:.9 });
+const meshMat = () => new THREE.MeshLambertMaterial({ color:0xc9ccd1, side:THREE.DoubleSide, flatShading:true });
 let wire = false;
 
 function setModel(obj) {
@@ -181,11 +193,13 @@ function setModel(obj) {
       const m = Array.isArray(o.material) ? o.material[0] : o.material;
       if (!m || !m.map) o.material = meshMat();
       else m.side = THREE.DoubleSide;
+      o.geometry.computeBoundsTree();
     }
   });
   modelGroup.add(obj);
   fit();
   loadSaved();
+  invalidate();
 }
 
 function fit() {
@@ -255,10 +269,11 @@ let unit = 'cm', snapOn = true, measureOn = true, axisLock = 'auto';
 let dims = [];          // {a,b,group,label}
 let first = null;       // điểm đầu đang chờ điểm thứ hai
 const raycaster = new THREE.Raycaster();
+raycaster.firstHitOnly = true;
 const ndc = new THREE.Vector2();
 
 const cursor = new THREE.Mesh(new THREE.SphereGeometry(1, 16, 12), new THREE.MeshBasicMaterial({ color:0x00e5ff, depthTest:false }));
-cursor.renderOrder = 10; cursor.visible = false; scene.add(cursor);
+cursor.userData.px = 4; cursor.renderOrder = 10; cursor.visible = false; scene.add(cursor);
 const liveLine = new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]),
   new THREE.LineBasicMaterial({ color:0xff8a80, depthTest:false }));
 liveLine.renderOrder = 9; liveLine.visible = false; scene.add(liveLine);
@@ -292,11 +307,12 @@ function pick(ev) {
     const vs = [hit.face.a, hit.face.b, hit.face.c].map(i =>
       new THREE.Vector3().fromBufferAttribute(pos, i).applyMatrix4(mesh.matrixWorld));
     const m = new THREE.Vector2(mx, my);
-    let best = 14, bp = null;
+    const SNAP_V = matchMedia('(pointer:coarse)').matches ? 14 : 9, SNAP_E = SNAP_V * 0.7;
+    let best = SNAP_V, bp = null;
     for (const v of vs) { const d = toScreen(v).distanceTo(m); if (d < best) { best = d; bp = v; } }
     if (bp) { p = bp; kind = 'vertex'; }
     else {
-      let be = 10, ep = null;
+      let be = SNAP_E, ep = null;
       for (let i = 0; i < 3; i++) {
         const A = vs[i], B = vs[(i + 1) % 3], sa = toScreen(A), sb = toScreen(B);
         const ab = sb.clone().sub(sa), L = ab.lengthSq();
@@ -317,8 +333,10 @@ function applyLock(p) {
   return first.clone().addScaledVector(ax, p.clone().sub(first).dot(ax));
 }
 
+// Chấm có kích thước cố định theo pixel trên màn hình, không to lên khi zoom ra
 function scaleMarkers() {
-  for (const m of markers) m.scale.setScalar(camera.position.distanceTo(m.position) * 0.011);
+  const k = 2 * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2)) / (renderer.domElement.clientHeight || 1);
+  for (const m of markers) m.scale.setScalar(camera.position.distanceTo(m.position) * k * (m.userData.px || 3));
 }
 
 const touchMode = matchMedia('(pointer:coarse)').matches;
@@ -352,7 +370,7 @@ let g = null;
 const off = ev => ({ clientX: ev.clientX, clientY: ev.clientY - OFFSET });
 const hideLive = () => { liveLine.visible = false; liveLabel.visible = false; };
 const firstMarker = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color:0xff1f1f, depthTest:false }));
-firstMarker.renderOrder = 10; firstMarker.visible = false; scene.add(firstMarker); markers.push(firstMarker);
+firstMarker.userData.px = 3.5; firstMarker.renderOrder = 10; firstMarker.visible = false; scene.add(firstMarker); markers.push(firstMarker);
 const HINT_IDLE = 'Chạm điểm 1, rồi chạm điểm 2 (hoặc chạm giữ điểm 1 và kéo sang điểm 2). Hai ngón: di chuyển/zoom. Muốn xoay: bấm nút "Đang đo".';
 const HINT_FIRST = 'Đã chọn điểm 1. Dùng hai ngón di chuyển/zoom tới điểm 2 rồi chạm vào điểm đó.';
 let hintFirst = null, hintHideAt = Date.now() + 9000;
@@ -476,7 +494,7 @@ function addDim(a, b, real = null, save = true) {
   line.renderOrder = 8; group.add(line);
   for (const q of [a, b]) {
     const s = new THREE.Mesh(new THREE.SphereGeometry(1, 12, 8), new THREE.MeshBasicMaterial({ color:0xff1f1f, depthTest:false }));
-    s.position.copy(q); s.renderOrder = 8; group.add(s); markers.push(s); s.userData.dim = true;
+    s.position.copy(q); s.renderOrder = 8; group.add(s); markers.push(s); s.userData.dim = true; s.userData.px = 3;
   }
   const el = document.createElement('div'); el.className = 'dim-label';
   const label = new CSS2DObject(el); label.position.copy(a).lerp(b, .5); group.add(label);
@@ -575,7 +593,7 @@ function setToggle(btn, on) { btn.classList.toggle('on', on); }
 function setMeasure(on) {
   measureOn = on;
   setToggle($('bMeasure'), on); setToggle($('bTool'), on);
-  $('bTool').textContent = on ? '📏 Đang đo (bấm để xoay)' : '✋ Đang xoay (bấm để đo)';
+  $('bTool').textContent = on ? '📏 Đo' : '✋ Xoay';
   if (touchMode) controls.touches.ONE = on ? -1 : THREE.TOUCH.ROTATE;   // đo: 1 ngón để đo; xoay: 1 ngón để xoay
   if (!on) { first = null; g = null; cursor.visible = liveLine.visible = liveLabel.visible = false; }
 }
@@ -587,7 +605,13 @@ if (touchMode) {
 }
 $('bSnap').onclick = () => { snapOn = !snapOn; setToggle($('bSnap'), snapOn); };
 $('axis').onchange = e => { axisLock = e.target.value; };
-$('unit').onchange = e => { unit = e.target.value; refresh(false); };
+function setUnit(u) {
+  unit = u; $('unit').value = u; $('bUnit').textContent = 'Đơn vị: ' + u;
+  refresh(false); invalidate();
+}
+$('unit').onchange = e => setUnit(e.target.value);
+$('bUnit').onclick = () => setUnit({ cm: 'mm', mm: 'm', m: 'cm' }[unit]);
+setUnit(unit);
 $('bWire').onclick = () => { wire = !wire; setToggle($('bWire'), wire); modelGroup.traverse(o => { if (o.isMesh && o.material) (Array.isArray(o.material) ? o.material : [o.material]).forEach(m => m.wireframe = wire); }); };
 $('bFit').onclick = fit;
 $('bList').onclick = () => $('side').classList.toggle('open');
@@ -606,12 +630,18 @@ addEventListener('keydown', e => {
 });
 
 // ---------- loop ----------
+// Chỉ vẽ lại khi có thay đổi (xoay/zoom/chạm/đo) để máy không nóng và không giật
+['pointerdown', 'pointermove', 'pointerup', 'pointercancel', 'wheel', 'keydown', 'click', 'resize'].forEach(t =>
+  addEventListener(t, invalidate, { passive: true, capture: true }));
 function loop(now = 0) {
-  controls.update();
+  const moved = controls.update();
   syncFirstMarker();
-  scaleMarkers();
-  renderer.render(scene, camera);
-  labelRenderer.render(scene, camera);
+  if (moved || dirty || now - lastRender > 400) {
+    scaleMarkers();
+    renderer.render(scene, camera);
+    labelRenderer.render(scene, camera);
+    dirty = false; lastRender = now;
+  }
   requestAnimationFrame(loop);
 }
 resize();

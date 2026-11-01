@@ -3,6 +3,7 @@ const CACHE = 'do3d-v1';
 const FILES = [
   './', './index.html', './manifest.json', './icon-180.png', './icon-192.png', './icon-512.png',
   './lib/build/three.module.js',
+  './lib/three-mesh-bvh.js',
   './lib/examples/jsm/controls/OrbitControls.js',
   './lib/examples/jsm/renderers/CSS2DRenderer.js',
   './lib/examples/jsm/loaders/OBJLoader.js',
