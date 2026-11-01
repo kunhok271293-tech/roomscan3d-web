@@ -163,6 +163,8 @@
       <button id="bSaveProj" class="on" title="Lưu mô hình + số đo + chi tiết vào MỘT file để mở lại sau">💾 Lưu dự án</button>
       <label class="btn" title="Mở file dự án đã lưu (.do3d)">📂 Mở dự án<input id="projIn" type="file" hidden></label>
       <button id="bObj" title="Xuất mô hình OBJ đã chỉnh tỉ lệ, theo đơn vị đang chọn (m/cm/mm), để đưa vào SketchUp hoặc phần mềm thiết kế">Xuất OBJ</button>
+      <button id="bStl" title="Xuất STL (SketchUp nhập được), theo đơn vị đang chọn">Xuất STL</button>
+      <button id="bGlb" title="Xuất GLB (SketchUp nhập được), đơn vị mét, ổ điện/ô gió là các khối riêng có tên">Xuất GLB</button>
       <button id="bSaveJson" title="Chỉ lưu số đo (nhẹ), cần có sẵn file mô hình">Lưu số đo</button>
       <label class="btn">Mở số đo<input id="jsonIn" type="file" accept=".json" hidden></label>
       <button id="bCsv">Xuất CSV</button>
@@ -209,6 +211,8 @@ import { STLLoader } from 'three/addons/loaders/STLLoader.js';
 import { USDZLoader } from 'three/addons/loaders/USDZLoader.js';
 import { mergeVertices } from 'three/addons/utils/BufferGeometryUtils.js';
 import { OBJExporter } from 'three/addons/exporters/OBJExporter.js';
+import { STLExporter } from 'three/addons/exporters/STLExporter.js';
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js';
 import { computeBoundsTree, disposeBoundsTree, acceleratedRaycast } from './lib/three-mesh-bvh.js';
 
 // BVH: bắn tia nhanh hơn rất nhiều trên lưới LiDAR hàng trăm nghìn tam giác
@@ -1040,8 +1044,48 @@ $('bObj').onclick = async () => {
   } catch (e) { toast('Không xuất được OBJ: ' + e.message, true); }
 };
 
+// Gom mô hình + chi tiết thành một nhóm đã "nướng" toạ độ thế giới (nhân k) để xuất STL/GLB
+const FEAT_FILE = { outlet: 'o_dien', switch: 'cong_tac', vent: 'o_gio', other: 'chi_tiet' };
+function buildExportGroup(k, glb) {
+  modelGroup.updateMatrixWorld(true);
+  const grp = new THREE.Group(); let i = 0;
+  const mat = glb ? new THREE.MeshStandardMaterial({ color: 0xc9ccd1, side: THREE.DoubleSide, roughness: 0.9 }) : undefined;
+  modelGroup.traverse(o => {
+    if (!o.isMesh) return;
+    const g = o.geometry.clone().applyMatrix4(o.matrixWorld);
+    if (k !== 1) g.scale(k, k, k);
+    g.deleteAttribute('uv');
+    const m = new THREE.Mesh(g, mat); m.name = 'mo_hinh_' + (++i); grp.add(m);
+  });
+  features.forEach((f, n) => {
+    const g = new THREE.BufferGeometry().setFromPoints(f.pts.slice(1).map(p => p.clone().multiplyScalar(k)));
+    g.setIndex([0, 1, 2, 0, 2, 3]); g.computeVertexNormals();
+    const m = new THREE.Mesh(g, glb ? new THREE.MeshBasicMaterial({ color: (FEAT_TYPES[f.type] || FEAT_TYPES.other).color, side: THREE.DoubleSide }) : undefined);
+    m.name = `${FEAT_FILE[f.type] || 'chi_tiet'}_${n + 1}_${mm(f.w)}x${mm(f.h)}`; grp.add(m);
+  });
+  grp.updateMatrixWorld(true);
+  return grp;
+}
+$('bStl').onclick = async () => {
+  toast('Đang xuất STL…'); await new Promise(r => setTimeout(r, 30));
+  try {
+    const k = { m: 1, cm: 100, mm: 1000 }[unit] || 1, uname = { m: 'Meters', cm: 'Centimeters', mm: 'Millimeters' }[unit] || 'Meters';
+    const data = new STLExporter().parse(buildExportGroup(k, false), { binary: true });
+    await saveFile(baseName() + '-tile' + ({ m: 'met', cm: 'cm', mm: 'mm' }[unit] || 'met') + '.stl', new Blob([data], { type: 'model/stl' }));
+    toast('Đã xuất STL theo đơn vị ' + unit + '. Trong SketchUp: File → Import → STereoLithography (*.stl) → Options → Units: ' + uname + '.');
+  } catch (e) { toast('Không xuất được STL: ' + e.message, true); }
+};
+$('bGlb').onclick = async () => {
+  toast('Đang xuất GLB…'); await new Promise(r => setTimeout(r, 30));
+  try {
+    const buf = await new GLTFExporter().parseAsync(buildExportGroup(1, true), { binary: true });
+    await saveFile(baseName() + '.glb', new Blob([buf], { type: 'model/gltf-binary' }));
+    toast('Đã xuất GLB (đơn vị mét, ổ điện/ô gió là các khối riêng). Trong SketchUp: File → Import → glTF Binary (*.glb).');
+  } catch (e) { toast('Không xuất được GLB: ' + e.message, true); }
+};
+
 $('bCsv').onclick = () => {
-  const P3 = v => [v.x, v.y, v.z].map(x => x.toFixed(4)).join(',');
+  const P3 =v => [v.x, v.y, v.z].map(x => x.toFixed(4)).join(',');
   const rows = ['STT,Số đo (mm),Nguồn,Số quét (mm),Lệch quét-thật (mm),Điểm A x,y,z (m),,,Điểm B x,y,z (m),,'];
   dims.forEach((d, i) => {
     const S = Math.round(d.a.distanceTo(d.b) * 1000);
@@ -1081,7 +1125,7 @@ $('bSnap').onclick = () => { snapOn = !snapOn; setToggle($('bSnap'), snapOn); };
 $('bAlign').onclick = () => { alignOn = !alignOn; setToggle($('bAlign'), alignOn); };
 $('axis').onchange = e => { axisLock = e.target.value; };
 function setUnit(u) {
-  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅'; $('pUnit').textContent = u + ' ⇅'; $('bObj').textContent = 'Xuất OBJ (' + u + ')';
+  unit = u; $('unit').value = u; $('bUnit').textContent = u + ' ⇅'; $('pUnit').textContent = u + ' ⇅'; $('bObj').textContent = 'Xuất OBJ (' + u + ')'; $('bStl').textContent = 'Xuất STL (' + u + ')';
   refresh(false); invalidate(); pDraw();
 }
 $('unit').onchange = e => setUnit(e.target.value);
