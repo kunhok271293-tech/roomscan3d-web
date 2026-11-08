@@ -1181,10 +1181,13 @@ function pMsgUpdate() {
   else t = 'Chưa chuẩn tỉ lệ: bấm ① để chuẩn, hoặc cứ đo rồi nhập số thật cho từng đoạn.';
   $('pMsg').textContent = t;
 }
+let pLastW = 0, pLastH = 0;
 function pResize() {
   const dpr = Math.min(devicePixelRatio || 1, 2), w = pc.clientWidth, h = pc.clientHeight;
-  pc.width = Math.round(w * dpr); pc.height = Math.round(h * dpr);
-  pctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  if (!w || !h) return;
+  const bw = Math.round(w * dpr), bh = Math.round(h * dpr);
+  if (pc.width !== bw || pc.height !== bh) { pc.width = bw; pc.height = bh; }      // đặt lại kích thước ảnh vẽ khi khung đổi (xoay màn hình)
+  pctx.setTransform(bw / w, 0, 0, bh / h, 0, 0);
 }
 function pFit() {
   if (!P.img) return;
@@ -1282,8 +1285,8 @@ function layoutLabels(items, s, bounds) {
 }
 function pDraw() {
   if (!P || !P.visible) return;
-  const w = pc.clientWidth, h = pc.clientHeight;
-  pctx.clearRect(0, 0, w, h);
+  pResize();                                                // luôn khớp kích thước khung hiện tại (tránh lệch khi xoay màn hình)
+  pctx.save(); pctx.setTransform(1, 0, 0, 1, 0, 0); pctx.clearRect(0, 0, pc.width, pc.height); pctx.restore();   // xoá TOÀN BỘ khung, không để sót vệt
   if (P.img) { pctx.drawImage(P.img, P.ox, P.oy, P.img.width * P.scale, P.img.height * P.scale); drawNotes(pctx, P, 1, true); }
   pMsgUpdate();
 }
@@ -1430,11 +1433,24 @@ pc.addEventListener('wheel', e => {
 
 function pOpen(on) {
   P.visible = on; $('photo').style.display = on ? 'flex' : 'none';
-  if (on) { pResize(); pFit(); pDraw(); }
+  if (on) { pResize(); pFit(); pLastW = pc.clientWidth; pLastH = pc.clientHeight; pDraw(); }
 }
 $('bPhoto').onclick = () => pOpen(true);
 $('pBack').onclick = () => { pOpen(false); invalidate(); };
-addEventListener('resize', () => { if (P.visible) { pResize(); pFit(); pDraw(); } });
+// Khung đổi kích thước (xoay ngang/dọc, thanh địa chỉ co giãn): xoay hướng thì căn lại cả ảnh, thay đổi nhỏ thì giữ nguyên chỗ đang xem
+function pOnResize() {
+  if (!P.visible) return;
+  const w = pc.clientWidth, h = pc.clientHeight;
+  if (!w || !h) return;
+  if (P.img) {
+    if (!pLastW || (pLastW > pLastH) !== (w > h)) pFit();
+    else { P.ox += (w - pLastW) / 2; P.oy += (h - pLastH) / 2; }
+  }
+  pLastW = w; pLastH = h; pResize(); pDraw();
+}
+new ResizeObserver(pOnResize).observe(pc);
+addEventListener('resize', pOnResize);
+addEventListener('orientationchange', () => setTimeout(pOnResize, 300));
 $('pFile').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
