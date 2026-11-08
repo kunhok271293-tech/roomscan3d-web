@@ -179,6 +179,7 @@
     <button id="pBack">← Mô hình 3D</button>
     <label class="btn">🖼 Mở ảnh<input id="pFile" type="file" accept="image/*" hidden></label>
     <button id="pCal">① Chuẩn tỉ lệ</button>
+    <button id="pFitBtn" title="Về lại tỉ lệ ban đầu: hiện cả ảnh vừa khung">⤢ Vừa khung</button>
     <button id="pUnit">cm ⇅</button>
     <button id="pUndo">↶</button>
     <button id="pSave">Lưu ảnh</button>
@@ -1177,8 +1178,8 @@ function pMsgUpdate() {
   else if (P.calMode === 'line') t = `Chuẩn tỉ lệ: chạm 2 đầu của đoạn đã biết chiều dài (${P.calPts.length}/2).`;
   else if (P.calMode === 'rect') t = `Chuẩn tỉ lệ: chạm 4 góc theo thứ tự trái-trên, phải-trên, phải-dưới, trái-dưới (${P.calPts.length}/4).`;
   else if (P.pending) t = 'Chạm điểm thứ hai.';
-  else if (P.map) t = 'Đã chuẩn tỉ lệ. Chạm 2 điểm để đo; chạm vào số đo để nhập số thật; kéo chấm để chỉnh; hai ngón để zoom.';
-  else t = 'Chưa chuẩn tỉ lệ: bấm ① để chuẩn, hoặc cứ đo rồi nhập số thật cho từng đoạn.';
+  else if (P.map) t = 'Đã chuẩn tỉ lệ. Chạm 2 điểm để đo; chạm giữ vào số đo để sửa; kéo chấm để chỉnh; hai ngón để zoom; ⤢ để về lại cả ảnh.';
+  else t = 'Chưa chuẩn tỉ lệ: bấm ① để chuẩn, hoặc cứ đo rồi nhập số thật cho từng đoạn. Chạm giữ vào số đo để sửa.';
   $('pMsg').textContent = t;
 }
 let pLastW = 0, pLastH = 0;
@@ -1360,15 +1361,22 @@ async function pNewDim(a, b) {
   else { const v = parseLen(r.a); if (v > 0) P.dims.push({ a, b, real: v }); }
   pDraw();
 }
+// Sửa số đo của một đường dim: CHẠM GIỮ vào nhãn của nó (chạm thường luôn là chọn điểm, để nhãn dày đặc không chặn việc chọn điểm)
+const pLabelAt = (sx, sy) => P.dims.find(d => d.lab && sx >= d.lab.x && sx <= d.lab.x + d.lab.w && sy >= d.lab.y && sy <= d.lab.y + d.lab.h);
+async function pEditDim(d) {
+  const comp = P.map ? mmDistP(d.a, d.b) / 1000 : null;
+  const r = await pDialog('Sửa số đo thật', comp != null ? 'Tính từ ảnh: ' + fmt(comp) + '. Đơn vị mặc định: ' + unit : 'Đơn vị mặc định: ' + unit,
+    { ph: 'số đo thật', val: d.real != null ? num(d.real) : '' }, null, comp != null ? 'Dùng số từ ảnh' : null);
+  if (r) { if (r.extra) d.real = null; else { const v = parseLen(r.a); if (v > 0) d.real = v; } }
+  pDraw();
+}
+let pLP = 0;
 async function pTap(sx, sy) {
-  for (const d of P.dims) if (d.lab && sx >= d.lab.x && sx <= d.lab.x + d.lab.w && sy >= d.lab.y && sy <= d.lab.y + d.lab.h) {
-    const comp = P.map ? mmDistP(d.a, d.b) / 1000 : null;
-    const r = await pDialog('Sửa số đo thật', comp != null ? 'Tính từ ảnh: ' + fmt(comp) + '. Đơn vị mặc định: ' + unit : 'Đơn vị mặc định: ' + unit,
-      { ph: 'số đo thật', val: d.real != null ? num(d.real) : '' }, null, comp != null ? 'Dùng số từ ảnh' : null);
-    if (r) { if (r.extra) d.real = null; else { const v = parseLen(r.a); if (v > 0) d.real = v; } }
-    pDraw(); return;
-  }
-  const ip = toImgP(sx, sy);
+  // chạm sát một chấm đã có (trong ~8 px) thì lấy đúng điểm đó, để các số đo chung điểm đầu khớp nhau chính xác; không bám vào điểm 1 đang chờ
+  let snapD = 8, sp = null;
+  const near = p => { const q = toScrP(p), d = Math.hypot(q.x - sx, q.y - sy); if (d < snapD) { snapD = d; sp = p; } };
+  P.calPts.forEach(near); P.dims.forEach(dm => { near(dm.a); near(dm.b); });
+  const ip = sp ? { x: sp.x, y: sp.y } : toImgP(sx, sy);
   if (P.calMode) {
     P.calPts.push(ip); pDraw();
     if (P.calPts.length === (P.calMode === 'line' ? 2 : 4)) await pFinishCal();
@@ -1397,10 +1405,18 @@ pc.addEventListener('pointerdown', e => {
   } else if (pp.size === 1) {
     const hit = pHit(q.x, q.y);
     pg = hit ? { type: 'drag', hit, x0: q.x, y0: q.y } : { type: 'pan', x0: q.x, y0: q.y, ox0: P.ox, oy0: P.oy, moved: false };
+    // giữ yên ~0,5 giây trên một nhãn số đo thì mở hộp sửa số đo
+    clearTimeout(pLP);
+    pLP = setTimeout(() => {
+      if (!pg || pg.moved || pg.done || pp.size !== 1) return;
+      const d = pLabelAt(q.x, q.y); if (!d) return;
+      pg.done = true; pEditDim(d);
+    }, 520);
   }
+  if (pp.size >= 2) clearTimeout(pLP);
 });
 pc.addEventListener('pointermove', e => {
-  if (!pp.has(e.pointerId) || !pg) return;
+  if (!pp.has(e.pointerId) || !pg || pg.done) return;
   const q = pXY(e); pp.set(e.pointerId, q);
   if (pg.type === 'pinch' && pp.size === 2) {
     const [a, b] = [...pp.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
@@ -1410,6 +1426,8 @@ pc.addEventListener('pointermove', e => {
     if (Math.hypot(q.x - pg.x0, q.y - pg.y0) > 8) pg.moved = true;
     if (pg.moved) { P.ox = pg.ox0 + q.x - pg.x0; P.oy = pg.oy0 + q.y - pg.y0; }
   } else if (pg.type === 'drag' && pp.size === 1) {
+    // chạm sát một chấm rồi nhấc tay ngay (không kéo) là CHỌN ĐIỂM, chỉ khi kéo đủ xa mới là kéo chấm đi chỗ khác
+    if (!pg.moved && Math.hypot(q.x - pg.x0, q.y - pg.y0) < 7) return;
     pg.moved = true;
     const ip = toImgP(q.x, q.y), h = pg.hit;
     if (h.arr) { h.arr[h.i] = ip; pRecalc(); } else if (h.obj) h.obj[h.k] = ip; else P.pending = ip;
@@ -1418,8 +1436,8 @@ pc.addEventListener('pointermove', e => {
 });
 function pEnd(e) {
   if (!pp.has(e.pointerId)) return;
-  const q = pXY(e), g = pg; pp.delete(e.pointerId);
-  if (pp.size === 0) { pg = null; if (g && g.type === 'pan' && !g.moved && e.type === 'pointerup') pTap(q.x, q.y); }
+  const q = pXY(e), g = pg; pp.delete(e.pointerId); clearTimeout(pLP);
+  if (pp.size === 0) { pg = null; if (g && (g.type === 'pan' || g.type === 'drag') && !g.moved && !g.done && e.type === 'pointerup') pTap(q.x, q.y); }
   else if (g && g.type === 'pinch') pg = null;
 }
 pc.addEventListener('pointerup', pEnd);
@@ -1465,6 +1483,7 @@ $('pcCancel').onclick = () => { $('pCalPick').style.display = 'none'; };
 function pStartCal(mode) { $('pCalPick').style.display = 'none'; P.calMode = mode; P.calPts = []; P.cal = null; P.map = null; P.pending = null; pDraw(); }
 $('pcLine').onclick = () => pStartCal('line');
 $('pcRect').onclick = () => pStartCal('rect');
+$('pFitBtn').onclick = () => { pFit(); pDraw(); };
 $('pUnit').onclick = () => setUnit({ cm: 'mm', mm: 'm', m: 'cm' }[unit]);
 $('pUndo').onclick = () => {
   if (P.pending) P.pending = null;
