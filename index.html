@@ -65,6 +65,23 @@
   #pbar > * { flex:none; }
   #pMsg { padding:6px 10px; font-size:13px; color:var(--muted); background:#1b1d21; flex:none; }
   #pCanvas { flex:1; min-height:0; width:100%; display:block; touch-action:none; }
+  #pSaveName { display:none; position:absolute; top:100px; left:50%; transform:translateX(-50%); z-index:40; background:var(--panel);
+    border:1px solid #00b0ff; border-radius:8px; padding:14px; width:min(340px, 92vw); box-shadow:0 8px 30px rgba(0,0,0,.5); }
+  #pSaveName input { width:100%; font:600 17px system-ui; padding:8px; margin:8px 0 2px; background:#15171a; color:var(--text);
+    border:1px solid var(--line); border-radius:6px; }
+  #pSaveName button { display:block; width:100%; margin-top:8px; text-align:left; }
+  #pSaveName small { color:var(--muted); display:block; font-size:11px; }
+  #pLib { display:none; position:absolute; inset:0; z-index:36; background:#111; flex-direction:column; }
+  .plibbar { display:flex; justify-content:space-between; align-items:center; padding:10px; background:var(--panel); border-bottom:1px solid var(--line); flex:none; }
+  #plList { flex:1; overflow:auto; padding:10px; display:flex; flex-direction:column; gap:10px; color:var(--muted); }
+  .plitem { display:flex; gap:10px; background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:8px; }
+  .plitem img { width:104px; height:78px; object-fit:cover; border-radius:4px; background:#222; flex:none; }
+  .plitem .info { flex:1; min-width:0; color:var(--text); }
+  .plitem .info b { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .plitem .info small { color:var(--muted); font-size:11px; display:block; margin:2px 0 6px; }
+  .plitem .acts { display:flex; flex-wrap:wrap; gap:6px; }
+  .plitem .acts button { padding:5px 8px; font-size:12px; }
+  #pd { z-index:41 !important; }
   #pCalPick, #pSavePick, #pd { display:none; position:absolute; top:100px; left:50%; transform:translateX(-50%); z-index:35; background:var(--panel);
     border:1px solid #00b0ff; border-radius:8px; padding:14px; width:min(340px, 92vw); box-shadow:0 8px 30px rgba(0,0,0,.5); }
   #pCalPick button, #pSavePick button { display:block; width:100%; margin-top:8px; text-align:left; }
@@ -183,6 +200,7 @@
     <button id="pUnit">cm ⇅</button>
     <button id="pUndo">↶</button>
     <button id="pSave">Lưu ảnh</button>
+    <button id="pLibBtn" title="Ảnh đã lưu trong ứng dụng">🗂 Đã lưu</button>
   </div>
   <div id="pMsg"></div>
   <canvas id="pCanvas"></canvas>
@@ -199,6 +217,19 @@
     <button data-m="large">Cả ảnh, nhãn to rõ<small>Dễ đọc trên điện thoại, hợp khi chỉ có vài số đo.</small></button>
     <button data-m="view">Đúng khung đang xem<small>Lưu giống hệt những gì đang thấy trên màn hình (đang zoom vào đâu thì lưu vùng đó).</small></button>
     <button id="psCancel">Huỷ</button>
+  </div>
+  <div id="pSaveName">
+    <b>Đặt tên và chọn nơi lưu</b>
+    <input id="psName" autocomplete="off" placeholder="Tên ảnh">
+    <button id="psPhone" class="on">📱 Về điện thoại<small>Mở bảng chia sẻ: chọn Lưu hình ảnh hoặc Lưu vào Tệp. Trên máy tính thì tải xuống.</small></button>
+    <button id="psApp">🗂 Trong ứng dụng<small>Lưu trong ứng dụng, mở lại để sửa tiếp bất cứ lúc nào (nút “Đã lưu”).</small></button>
+    <button id="psBoth">Cả hai nơi</button>
+    <button id="psNameCancel">Huỷ</button>
+    <small id="psHint"></small>
+  </div>
+  <div id="pLib">
+    <div class="plibbar"><b>🗂 Ảnh đã lưu trong ứng dụng</b><button id="plClose">✕ Đóng</button></div>
+    <div id="plList"></div>
   </div>
   <div id="pd">
     <b id="pdTitle"></b>
@@ -1504,7 +1535,7 @@ addEventListener('orientationchange', () => setTimeout(pOnResize, 300));
 $('pFile').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
-    P.img = await createImageBitmap(f);
+    P.img = await createImageBitmap(f); P.file = f;
     P.dims = []; P.calPts = []; P.calMode = null; P.cal = null; P.map = null; P.pending = null; P.draft = null; P.cursor = null;
     pFit(); pDraw();
   } catch { $('pMsg').textContent = 'Không đọc được ảnh này. Hãy thử ảnh JPG hoặc PNG.'; }
@@ -1541,14 +1572,111 @@ function pExport(mode) {
     const div = { compact: 1100, normal: 650, large: 420 }[mode];
     drawNotes(x, { scale: 1, ox: 0, oy: 0 }, Math.max(1, Math.min(c.width, c.height) / div), false, { x: 0, y: 0, w: c.width, h: c.height });
   }
-  c.toBlob(async b => {
-    const file = new File([b], 'anh-do.png', { type: 'image/png' });
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {       // điện thoại: mở bảng chia sẻ / lưu vào Ảnh
-      try { await navigator.share({ files: [file] }); return; } catch (err) { if (err.name === 'AbortError') return; }
-    }
-    download('anh-do.png', b);
+  c.toBlob(b => {                        // vẽ xong: hỏi tên ảnh và nơi lưu
+    pSaveCtx = { blob: b };
+    $('psName').value = defaultPhotoName();
+    $('psHint').textContent = '';
+    $('pSaveName').style.display = 'block';
+    setTimeout(() => { $('psName').focus(); $('psName').select(); }, 0);
   });
 };
+
+// ---------- đặt tên ảnh, lưu về điện thoại hoặc lưu trong ứng dụng ----------
+let pSaveCtx = null;
+const pad2 = n => String(n).padStart(2, '0');
+function defaultPhotoName() { const d = new Date(); return `anh-do-${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`; }
+function cleanPhotoName(raw) {          // bỏ ký tự không dùng được trong tên file, bỏ đuôi .png nếu gõ thừa
+  let n = String(raw || '').replace(/[\\/:*?"<>|\u0000-\u001f]/g, ' ').replace(/\s+/g, ' ').trim().replace(/\.png$/i, '').trim().slice(0, 80);
+  return n || defaultPhotoName();
+}
+async function savePhotoToPhone(name, blob) {       // điện thoại: bảng chia sẻ (Lưu vào Ảnh/Tệp); máy tính: tải xuống
+  const file = new File([blob], name + '.png', { type: 'image/png' });
+  if (navigator.canShare && navigator.canShare({ files: [file] })) {
+    try { await navigator.share({ files: [file] }); return true; } catch (err) { if (err.name === 'AbortError') return false; }
+  }
+  download(name + '.png', blob); return true;
+}
+
+// Thư viện trong ứng dụng: lưu trong trình duyệt (IndexedDB), gồm ảnh đã ghi số đo và dữ liệu để mở lại sửa tiếp
+let dbPromise = null;
+function openDb() {
+  return dbPromise || (dbPromise = new Promise((res, rej) => {
+    const rq = indexedDB.open('do3d', 1);
+    rq.onupgradeneeded = () => rq.result.createObjectStore('photos', { keyPath: 'id', autoIncrement: true });
+    rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error);
+  }));
+}
+const idbReq = r => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+const libStore = async mode => (await openDb()).transaction('photos', mode).objectStore('photos');
+const libAll = async () => idbReq((await libStore('readonly')).getAll());
+const libAdd = async rec => idbReq((await libStore('readwrite')).add(rec));
+const libPut = async rec => idbReq((await libStore('readwrite')).put(rec));
+const libDel = async id => idbReq((await libStore('readwrite')).delete(id));
+async function savePhotoToApp(name, blob) {
+  try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
+  const pt = p => ({ x: p.x, y: p.y });
+  await libAdd({ name, ts: Date.now(), png: blob, src: P.file || null, w: P.img.width, h: P.img.height, unit,
+    dims: P.dims.map(d => ({ a: pt(d.a), b: pt(d.b), real: d.real })), calPts: P.calPts.map(pt), cal: P.cal ? { ...P.cal } : null });
+}
+async function doSavePhoto(where) {
+  if (!pSaveCtx) return;
+  const name = cleanPhotoName($('psName').value), blob = pSaveCtx.blob, msgs = [];
+  $('pSaveName').style.display = 'none'; pSaveCtx = null;
+  try {
+    if (where !== 'app') { if (await savePhotoToPhone(name, blob)) msgs.push('đã gửi tới điện thoại'); }
+    if (where !== 'phone') { await savePhotoToApp(name, blob); msgs.push('đã lưu trong ứng dụng (🗂 Đã lưu)'); }
+    $('pMsg').textContent = '“' + name + '”: ' + (msgs.join(', ') || 'đã huỷ');
+  } catch (e) { $('pMsg').textContent = 'Không lưu được: ' + (e && e.message ? e.message : e); }
+}
+$('psPhone').onclick = () => doSavePhoto('phone');
+$('psApp').onclick = () => doSavePhoto('app');
+$('psBoth').onclick = () => doSavePhoto('both');
+$('psNameCancel').onclick = () => { $('pSaveName').style.display = 'none'; pSaveCtx = null; };
+$('psName').addEventListener('keydown', e => { if (e.key === 'Enter') doSavePhoto('phone'); else if (e.key === 'Escape') $('psNameCancel').click(); });
+
+let libUrls = [];
+function closeLib() { $('pLib').style.display = 'none'; libUrls.forEach(u => URL.revokeObjectURL(u)); libUrls = []; }
+async function openLib() {
+  $('pLib').style.display = 'flex';
+  const list = $('plList'); list.textContent = 'Đang tải…';
+  let recs;
+  try { recs = await libAll(); } catch (e) { list.textContent = 'Không đọc được thư viện: ' + (e && e.message ? e.message : e); return; }
+  libUrls.forEach(u => URL.revokeObjectURL(u)); libUrls = [];
+  list.textContent = '';
+  if (!recs.length) { list.textContent = 'Chưa có ảnh nào. Khi lưu ảnh, chọn “Trong ứng dụng” để lưu vào đây.'; return; }
+  recs.sort((a, b) => b.ts - a.ts).forEach(rec => {
+    const url = URL.createObjectURL(rec.png); libUrls.push(url);
+    const item = document.createElement('div'); item.className = 'plitem';
+    const im = document.createElement('img'); im.src = url;
+    const info = document.createElement('div'); info.className = 'info';
+    const nm = document.createElement('b'); nm.textContent = rec.name;
+    const sm = document.createElement('small'); sm.textContent = new Date(rec.ts).toLocaleString('vi-VN') + ' · ' + (rec.dims ? rec.dims.length : 0) + ' số đo · ' + (rec.png.size / 1048576).toFixed(1) + ' MB';
+    const acts = document.createElement('div'); acts.className = 'acts';
+    const mk = (txt, fn) => { const b = document.createElement('button'); b.textContent = txt; b.onclick = fn; acts.append(b); };
+    mk('📱 Gửi về điện thoại', () => savePhotoToPhone(rec.name, rec.png));
+    mk('✎ Mở để sửa', () => reopenPhoto(rec));
+    mk('Đổi tên', async () => {
+      const r = await pDialog('Đổi tên ảnh', 'Tên hiện tại: ' + rec.name, { ph: 'Tên mới', val: rec.name });
+      if (r && r.a !== undefined) { rec.name = cleanPhotoName(r.a); await libPut(rec); openLib(); }
+    });
+    mk('Xoá', async () => { if (confirm('Xoá ảnh “' + rec.name + '” khỏi ứng dụng?')) { await libDel(rec.id); openLib(); } });
+    info.append(nm, sm, acts); item.append(im, info); list.append(item);
+  });
+}
+async function reopenPhoto(rec) {
+  if (!rec.src) { $('pMsg').textContent = 'Ảnh này không có bản gốc để sửa tiếp (chỉ có ảnh đã ghi số đo).'; return; }
+  try {
+    P.img = await createImageBitmap(rec.src); P.file = rec.src;
+    P.dims = (rec.dims || []).map(d => ({ a: { ...d.a }, b: { ...d.b }, real: d.real }));
+    P.calPts = (rec.calPts || []).map(p => ({ ...p })); P.cal = rec.cal ? { ...rec.cal } : null;
+    P.calMode = null; P.pending = null; P.draft = null; P.cursor = null; P.map = null;
+    pRecalc(); if (rec.unit) setUnit(rec.unit);
+    closeLib(); pFit(); pDraw();
+    $('pMsg').textContent = 'Đã mở “' + rec.name + '” để sửa tiếp.';
+  } catch (e) { $('pMsg').textContent = 'Không mở được ảnh: ' + (e && e.message ? e.message : e); }
+}
+$('pLibBtn').onclick = openLib;
+$('plClose').onclick = closeLib;
 
 // Nhãn số đo chồng lên nhau trên màn hình thì đẩy lệch theo chiều dọc cho từng nhãn đọc được
 function declutterLabels() {
