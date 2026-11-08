@@ -65,10 +65,10 @@
   #pbar > * { flex:none; }
   #pMsg { padding:6px 10px; font-size:13px; color:var(--muted); background:#1b1d21; flex:none; }
   #pCanvas { flex:1; min-height:0; width:100%; display:block; touch-action:none; }
-  #pCalPick, #pd { display:none; position:absolute; top:100px; left:50%; transform:translateX(-50%); z-index:35; background:var(--panel);
+  #pCalPick, #pSavePick, #pd { display:none; position:absolute; top:100px; left:50%; transform:translateX(-50%); z-index:35; background:var(--panel);
     border:1px solid #00b0ff; border-radius:8px; padding:14px; width:min(340px, 92vw); box-shadow:0 8px 30px rgba(0,0,0,.5); }
-  #pCalPick button { display:block; width:100%; margin-top:8px; text-align:left; }
-  #pCalPick small { color:var(--muted); display:block; font-size:11px; }
+  #pCalPick button, #pSavePick button { display:block; width:100%; margin-top:8px; text-align:left; }
+  #pCalPick small, #pSavePick small { color:var(--muted); display:block; font-size:11px; }
   #pd input { width:100%; font:600 18px system-ui; padding:8px; margin:6px 0; background:#15171a; color:var(--text);
     border:1px solid var(--line); border-radius:6px; }
   #pd .btns { display:flex; gap:6px; flex-wrap:wrap; margin-top:6px; }
@@ -190,6 +190,14 @@
     <button id="pcLine">Một đoạn đã biết chiều dài<small>Chụp thẳng góc, vật mẫu nằm cùng mặt phẳng với chỗ cần đo (ví dụ thước, khung cửa).</small></button>
     <button id="pcRect">Hình chữ nhật đã biết kích thước<small>Chính xác hơn, bù được ảnh chụp nghiêng (ví dụ tờ A4 210×297, mặt ổ điện, tấm gạch).</small></button>
     <button id="pcCancel">Huỷ</button>
+  </div>
+  <div id="pSavePick">
+    <b>Lưu ảnh kèm số đo</b>
+    <button data-m="compact">Cả ảnh, nhãn nhỏ gọn<small>Nhiều số đo, ít bị chồng nhau nhất. Phóng to ảnh khi xem.</small></button>
+    <button data-m="normal">Cả ảnh, nhãn cỡ vừa<small>Cân đối giữa dễ đọc và gọn.</small></button>
+    <button data-m="large">Cả ảnh, nhãn to rõ<small>Dễ đọc trên điện thoại, hợp khi chỉ có vài số đo.</small></button>
+    <button data-m="view">Đúng khung đang xem<small>Lưu giống hệt những gì đang thấy trên màn hình (đang zoom vào đâu thì lưu vùng đó).</small></button>
+    <button id="psCancel">Huỷ</button>
   </div>
   <div id="pd">
     <b id="pdTitle"></b>
@@ -1187,7 +1195,7 @@ function dimText(d) { return d.real != null ? fmt(d.real) : (P.map ? '≈ ' + fm
 function mmDistP(a, b) { const A = P.map(a), B = P.map(b); return Math.hypot(A.x - B.x, A.y - B.y); }
 
 function dot(x, p, r, col) { x.fillStyle = col; x.beginPath(); x.arc(p.x, p.y, r, 0, 6.2832); x.fill(); x.strokeStyle = '#000'; x.lineWidth = 1; x.stroke(); }
-function drawNotes(x, tf, s, live) {
+function drawNotes(x, tf, s, live, bounds) {
   const S = p => ({ x: p.x * tf.scale + tf.ox, y: p.y * tf.scale + tf.oy });
   x.lineJoin = 'round'; x.font = `600 ${14 * s}px system-ui,sans-serif`; x.textBaseline = 'middle'; x.textAlign = 'center';
   if (P.calPts.length) {
@@ -1197,30 +1205,80 @@ function drawNotes(x, tf, s, live) {
     x.stroke(); x.setLineDash([]);
     P.calPts.forEach(p => dot(x, S(p), 5 * s, '#00e5ff'));
   }
-  // vẽ đường dim trước, nhãn sau; nhãn nào chồng lên nhãn đã đặt thì đẩy dọc theo phương vuông góc với đường dim
-  const placed = [], hit = (a, b) => a.x < b.x + b.w + 2 * s && b.x < a.x + a.w + 2 * s && a.y < b.y + b.h + 2 * s && b.y < a.y + a.h + 2 * s;
-  for (const d of P.dims) {
-    const A = S(d.a), B = S(d.b);
-    x.strokeStyle = '#ff1f1f'; x.lineWidth = 2 * s; x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke();
-    dot(x, A, 4.5 * s, '#ff1f1f'); dot(x, B, 4.5 * s, '#ff1f1f');
+  // vẽ đường dim trước, nhãn sau
+  const items = P.dims.map(d => {
+    const A = S(d.a), B = S(d.b), txt = dimText(d), w = x.measureText(txt).width + 14 * s, h = 24 * s;
+    const L = Math.hypot(B.x - A.x, B.y - A.y) || 1, tx = (B.x - A.x) / L, ty = (B.y - A.y) / L;
+    return { d, A, B, txt, w, h, m: { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 }, tx, ty, nx: -ty, ny: tx };
+  });
+  for (const it of items) {
+    x.strokeStyle = '#ff1f1f'; x.lineWidth = 2 * s; x.beginPath(); x.moveTo(it.A.x, it.A.y); x.lineTo(it.B.x, it.B.y); x.stroke();
+    dot(x, it.A, 4.5 * s, '#ff1f1f'); dot(x, it.B, 4.5 * s, '#ff1f1f');
   }
-  for (const d of P.dims) {
-    const A = S(d.a), B = S(d.b), col = d.real != null ? '#ff5a4d' : '#aab0b6';
-    const txt = dimText(d), w = x.measureText(txt).width + 14 * s, h = 24 * s, m = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
-    const L = Math.hypot(B.x - A.x, B.y - A.y) || 1, nx = -(B.y - A.y) / L, ny = (B.x - A.x) / L;
-    let rect = { x: m.x - w / 2, y: m.y - h / 2, w, h }, moved = false;
-    for (let k = 0; k < 14 && placed.some(p => hit(rect, p)); k++) {
-      const step = (Math.floor(k / 2) + 1) * (h + 3 * s) * (k % 2 ? -1 : 1);
-      rect = { x: m.x + nx * step - w / 2, y: m.y + ny * step - h / 2, w, h }; moved = true;
+  const rects = layoutLabels(items, s, bounds);
+  items.forEach((it, i) => {
+    const r = rects[i], col = it.d.real != null ? '#ff5a4d' : '#aab0b6';
+    if (Math.hypot(r.x + r.w / 2 - it.m.x, r.y + r.h / 2 - it.m.y) > 2 * s) {      // nhãn bị đẩy ra xa: vạch nối về đường dim
+      x.strokeStyle = col; x.lineWidth = 1 * s; x.beginPath(); x.moveTo(it.m.x, it.m.y); x.lineTo(r.x + r.w / 2, r.y + r.h / 2); x.stroke();
+      dot(x, it.m, 2.5 * s, col);
     }
-    placed.push(rect);
-    if (moved) { x.strokeStyle = col; x.lineWidth = 1 * s; x.beginPath(); x.moveTo(m.x, m.y); x.lineTo(rect.x + w / 2, rect.y + h / 2); x.stroke(); }
-    x.fillStyle = 'rgba(20,20,20,.92)'; x.fillRect(rect.x, rect.y, w, h);
-    x.strokeStyle = col; x.lineWidth = 1.2 * s; x.strokeRect(rect.x, rect.y, w, h);
-    x.fillStyle = col; x.fillText(txt, rect.x + w / 2, rect.y + h / 2 + 1);
-    if (live) d.lab = rect;
-  }
+    x.fillStyle = 'rgba(20,20,20,.92)'; x.fillRect(r.x, r.y, r.w, r.h);
+    x.strokeStyle = col; x.lineWidth = 1.2 * s; x.strokeRect(r.x, r.y, r.w, r.h);
+    x.fillStyle = col; x.fillText(it.txt, r.x + r.w / 2, r.y + r.h / 2 + 1);
+    if (live) it.d.lab = r;
+  });
   if (P.pending) dot(x, S(P.pending), 5 * s, '#ff1f1f');
+}
+
+// Đoạn thẳng a-b có cắt hoặc nằm trong hình chữ nhật r (mở rộng thêm pad) không
+function segHitsRect(a, b, r, pad) {
+  const x0 = r.x - pad, y0 = r.y - pad, x1 = r.x + r.w + pad, y1 = r.y + r.h + pad;
+  const inside = p => p.x >= x0 && p.x <= x1 && p.y >= y0 && p.y <= y1;
+  if (inside(a) || inside(b)) return true;
+  const cross = (p, q, r2, s2) => {
+    const d = (q.x - p.x) * (s2.y - r2.y) - (q.y - p.y) * (s2.x - r2.x);
+    if (Math.abs(d) < 1e-9) return false;
+    const t = ((r2.x - p.x) * (s2.y - r2.y) - (r2.y - p.y) * (s2.x - r2.x)) / d;
+    const u = ((r2.x - p.x) * (q.y - p.y) - (r2.y - p.y) * (q.x - p.x)) / d;
+    return t >= 0 && t <= 1 && u >= 0 && u <= 1;
+  };
+  const c = [{ x: x0, y: y0 }, { x: x1, y: y0 }, { x: x1, y: y1 }, { x: x0, y: y1 }];
+  return cross(a, b, c[0], c[1]) || cross(a, b, c[1], c[2]) || cross(a, b, c[2], c[3]) || cross(a, b, c[3], c[0]);
+}
+// Mỗi nhãn thử đặt ở giữa đường dim, nếu vướng thì thử các vị trí xa dần theo 8 hướng quanh đó. Vị trí hợp lệ là vị trí không đè
+// lên nhãn đã đặt, không cắt đường dim của số đo khác và không che chấm đầu mút của chúng. Hết chỗ thì lấy vị trí ít vướng nhất.
+function layoutLabels(items, s, bounds) {
+  const placed = [], pad = 3 * s, dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
+  const overlap = (a, b) => a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
+  const hasPt = (r, p) => p.x >= r.x - pad && p.x <= r.x + r.w + pad && p.y >= r.y - pad && p.y <= r.y + r.h + pad;
+  return items.map((it, idx) => {
+    const cands = [{ dx: 0, dy: 0 }];
+    for (let k = 1; k <= 14; k++) {
+      const pp = k * (it.h + 4 * s), aa = k * it.w * 0.55;
+      for (const [u, v] of dirs) cands.push({ dx: it.nx * u * pp + it.tx * v * aa, dy: it.ny * u * pp + it.ty * v * aa });
+    }
+    cands.sort((p, q) => Math.hypot(p.dx, p.dy) - Math.hypot(q.dx, q.dy));
+    let best = null, bs = Infinity;
+    for (const c of cands) {
+      const r = { x: it.m.x + c.dx - it.w / 2, y: it.m.y + c.dy - it.h / 2, w: it.w, h: it.h };
+      if (bounds) {                                                       // lưu ảnh: giữ nhãn nằm trong khung ảnh
+        r.x = Math.min(Math.max(r.x, bounds.x), bounds.x + bounds.w - r.w);
+        r.y = Math.min(Math.max(r.y, bounds.y), bounds.y + bounds.h - r.h);
+      }
+      let conflicts = 0;
+      for (const p of placed) if (overlap(r, p)) conflicts += 100;
+      items.forEach((o, j) => {
+        if (j === idx) return;
+        if (segHitsRect(o.A, o.B, r, pad)) conflicts += 10;
+        if (hasPt(r, o.A) || hasPt(r, o.B)) conflicts += 5;
+      });
+      if (!conflicts) { best = r; break; }
+      const score = conflicts + Math.hypot(c.dx, c.dy) / (it.h * 20);
+      if (score < bs) { bs = score; best = r; }
+    }
+    placed.push(best);
+    return best;
+  });
 }
 function pDraw() {
   if (!P || !P.visible) return;
@@ -1399,11 +1457,23 @@ $('pUndo').onclick = () => {
   else if (P.dims.length) P.dims.pop();
   pDraw();
 };
-$('pSave').onclick = () => {
+$('pSave').onclick = () => { if (P.img) $('pSavePick').style.display = 'block'; };
+$('psCancel').onclick = () => { $('pSavePick').style.display = 'none'; };
+document.querySelectorAll('#pSavePick [data-m]').forEach(b => { b.onclick = () => pExport(b.dataset.m); });
+// mode: compact / normal / large = cả ảnh với cỡ nhãn khác nhau; view = đúng khung đang xem trên màn hình
+function pExport(mode) {
+  $('pSavePick').style.display = 'none';
   if (!P.img) return;
-  const c = document.createElement('canvas'); c.width = P.img.width; c.height = P.img.height;
-  const x = c.getContext('2d'); x.drawImage(P.img, 0, 0);
-  drawNotes(x, { scale: 1, ox: 0, oy: 0 }, Math.max(1, Math.min(c.width, c.height) / 650), false);
+  const c = document.createElement('canvas'), x = c.getContext('2d');
+  if (mode === 'view') {
+    c.width = pc.width; c.height = pc.height;
+    x.fillStyle = '#111'; x.fillRect(0, 0, c.width, c.height); x.drawImage(pc, 0, 0);
+  } else {
+    c.width = P.img.width; c.height = P.img.height; x.drawImage(P.img, 0, 0);
+    // cỡ nhãn tính theo cạnh ngắn của ảnh, chia càng lớn thì nhãn càng nhỏ
+    const div = { compact: 1100, normal: 650, large: 420 }[mode];
+    drawNotes(x, { scale: 1, ox: 0, oy: 0 }, Math.max(1, Math.min(c.width, c.height) / div), false, { x: 0, y: 0, w: c.width, h: c.height });
+  }
   c.toBlob(async b => {
     const file = new File([b], 'anh-do.png', { type: 'image/png' });
     if (navigator.canShare && navigator.canShare({ files: [file] })) {       // điện thoại: mở bảng chia sẻ / lưu vào Ảnh
