@@ -1165,7 +1165,7 @@ addEventListener('keydown', e => {
 // ---------- đo trên ảnh chụp ----------
 // Ảnh được chuẩn tỉ lệ bằng một đoạn hoặc một hình chữ nhật đã biết kích thước (hình chữ nhật bù được ảnh chụp nghiêng).
 // Số đo chỉ đúng với các điểm nằm CÙNG MẶT PHẲNG với vật mẫu dùng để chuẩn tỉ lệ.
-var P = { visible: false, img: null, scale: 1, ox: 0, oy: 0, dims: [], calPts: [], calMode: null, cal: null, map: null, pending: null };
+var P = { visible: false, draft: null, cursor: null, img: null, scale: 1, ox: 0, oy: 0, dims: [], calPts: [], calMode: null, cal: null, map: null, pending: null };
 const pc = $('pCanvas'), pctx = pc.getContext('2d');
 const pp = new Map(); let pg = null;
 const toImgP = (sx, sy) => ({ x: (sx - P.ox) / P.scale, y: (sy - P.oy) / P.scale });
@@ -1231,7 +1231,27 @@ function drawNotes(x, tf, s, live, bounds) {
     x.fillStyle = col; x.fillText(it.txt, r.x + r.w / 2, r.y + r.h / 2 + 1);
     if (live) it.d.lab = r;
   });
-  if (P.pending) dot(x, S(P.pending), 5 * s, '#ff1f1f');
+  const ring = p => { x.strokeStyle = '#fff'; x.lineWidth = 2 * s; x.beginPath(); x.arc(p.x, p.y, 9 * s, 0, 6.2832); x.stroke(); dot(x, p, 5 * s, '#ff1f1f'); };
+  const guide = (A, B) => { x.strokeStyle = '#ffd54f'; x.lineWidth = 2.5 * s; x.setLineDash([8 * s, 5 * s]); x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke(); x.setLineDash([]); };
+  const tag = (m, txt) => {            // nhãn nhỏ cho đường gióng
+    const w = x.measureText(txt).width + 12 * s, h = 22 * s;
+    x.fillStyle = 'rgba(20,20,20,.92)'; x.fillRect(m.x - w / 2, m.y - h - 6 * s, w, h);
+    x.strokeStyle = '#ffd54f'; x.lineWidth = 1 * s; x.strokeRect(m.x - w / 2, m.y - h - 6 * s, w, h);
+    x.fillStyle = '#ffd54f'; x.fillText(txt, m.x, m.y - h / 2 - 6 * s + 1);
+  };
+  if (live && P.draft) {               // hai điểm đã chọn, đang nhập số đo: giữ đường nối để kiểm tra chấm đúng chưa
+    const A = S(P.draft.a), B = S(P.draft.b);
+    guide(A, B); ring(A); ring(B);
+    if (P.map) tag({ x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 }, '≈ ' + fmt(mmDistP(P.draft.a, P.draft.b) / 1000));
+  }
+  const anchor = P.calMode ? P.calPts[P.calPts.length - 1] : P.pending;
+  if (live && anchor && P.cursor) {    // đường gióng từ điểm vừa chọn tới vị trí đang trỏ/chạm
+    const A = S(anchor), C = S(P.cursor);
+    guide(A, C);
+    x.strokeStyle = '#fff'; x.lineWidth = 1.5 * s; x.beginPath(); x.moveTo(C.x - 10 * s, C.y); x.lineTo(C.x + 10 * s, C.y); x.moveTo(C.x, C.y - 10 * s); x.lineTo(C.x, C.y + 10 * s); x.stroke();
+    if (P.map && !P.calMode) tag({ x: (A.x + C.x) / 2, y: (A.y + C.y) / 2 }, '≈ ' + fmt(mmDistP(anchor, P.cursor) / 1000));
+  }
+  if (P.pending) ring(S(P.pending));
 }
 
 // Đoạn thẳng a-b có cắt hoặc nằm trong hình chữ nhật r (mở rộng thêm pad) không
@@ -1354,9 +1374,11 @@ async function pFinishCal() {
 }
 async function pNewDim(a, b) {
   const comp = P.map ? mmDistP(a, b) / 1000 : null;
+  P.draft = { a, b }; pDraw();                       // giữ đường nối + hai chấm trên ảnh trong lúc nhập số đo, để kiểm tra mình chấm đúng chưa
   const r = await pDialog('Số đo thật', comp != null ? 'Tính từ ảnh: ' + fmt(comp) + ' (chỉ tham khảo). Đơn vị mặc định: ' + unit : 'Chưa chuẩn tỉ lệ nên chưa có số tính từ ảnh. Đơn vị mặc định: ' + unit,
     { ph: 'vd 2650 hoặc 2.65m' }, null, comp != null ? 'Dùng số từ ảnh' : null);
-  if (!r) return;
+  P.draft = null;
+  if (!r) { pDraw(); return; }
   if (r.extra) { P.dims.push({ a, b, real: null }); }
   else { const v = parseLen(r.a); if (v > 0) P.dims.push({ a, b, real: v }); }
   pDraw();
@@ -1370,13 +1392,17 @@ async function pEditDim(d) {
   if (r) { if (r.extra) d.real = null; else { const v = parseLen(r.a); if (v > 0) d.real = v; } }
   pDraw();
 }
-let pLP = 0;
-async function pTap(sx, sy) {
-  // chạm sát một chấm đã có (trong ~8 px) thì lấy đúng điểm đó, để các số đo chung điểm đầu khớp nhau chính xác; không bám vào điểm 1 đang chờ
+let pLP = 0, pRaf = 0;
+function pDrawSoon() { if (!pRaf) pRaf = requestAnimationFrame(() => { pRaf = 0; pDraw(); }); }
+// Điểm ảnh ứng với vị trí chạm: chạm sát một chấm đã có (trong ~8 px) thì lấy đúng điểm đó, để các số đo chung điểm đầu khớp nhau chính xác
+function pSnapImg(sx, sy) {
   let snapD = 8, sp = null;
   const near = p => { const q = toScrP(p), d = Math.hypot(q.x - sx, q.y - sy); if (d < snapD) { snapD = d; sp = p; } };
   P.calPts.forEach(near); P.dims.forEach(dm => { near(dm.a); near(dm.b); });
-  const ip = sp ? { x: sp.x, y: sp.y } : toImgP(sx, sy);
+  return sp ? { x: sp.x, y: sp.y } : toImgP(sx, sy);
+}
+async function pTap(sx, sy) {
+  const ip = pSnapImg(sx, sy);
   if (P.calMode) {
     P.calPts.push(ip); pDraw();
     if (P.calPts.length === (P.calMode === 'line' ? 2 : 4)) await pFinishCal();
@@ -1406,6 +1432,7 @@ pc.addEventListener('pointerdown', e => {
     const hit = pHit(q.x, q.y);
     pg = hit ? { type: 'drag', hit, x0: q.x, y0: q.y } : { type: 'pan', x0: q.x, y0: q.y, ox0: P.ox, oy0: P.oy, moved: false };
     // giữ yên ~0,5 giây trên một nhãn số đo thì mở hộp sửa số đo
+    if (P.pending || P.calMode) { P.cursor = pSnapImg(q.x, q.y); pDraw(); }     // đang chờ điểm tiếp theo: hiện đường gióng tới chỗ chạm
     clearTimeout(pLP);
     pLP = setTimeout(() => {
       if (!pg || pg.moved || pg.done || pp.size !== 1) return;
@@ -1416,7 +1443,11 @@ pc.addEventListener('pointerdown', e => {
   if (pp.size >= 2) clearTimeout(pLP);
 });
 pc.addEventListener('pointermove', e => {
-  if (!pp.has(e.pointerId) || !pg || pg.done) return;
+  if (!pp.has(e.pointerId) || !pg || pg.done) {
+    // máy tính: rê chuột (chưa bấm) thì đường gióng đi theo con trỏ
+    if (!pg && !pp.size && P.img && (P.pending || P.calMode) && e.pointerType === 'mouse') { const q = pXY(e); P.cursor = pSnapImg(q.x, q.y); pDrawSoon(); }
+    return;
+  }
   const q = pXY(e); pp.set(e.pointerId, q);
   if (pg.type === 'pinch' && pp.size === 2) {
     const [a, b] = [...pp.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
@@ -1424,11 +1455,11 @@ pc.addEventListener('pointermove', e => {
     P.ox = cx - pg.ip.x * P.scale; P.oy = cy - pg.ip.y * P.scale;
   } else if (pg.type === 'pan' && pp.size === 1) {
     if (Math.hypot(q.x - pg.x0, q.y - pg.y0) > 8) pg.moved = true;
-    if (pg.moved) { P.ox = pg.ox0 + q.x - pg.x0; P.oy = pg.oy0 + q.y - pg.y0; }
+    if (pg.moved) { P.cursor = null; P.ox = pg.ox0 + q.x - pg.x0; P.oy = pg.oy0 + q.y - pg.y0; }
   } else if (pg.type === 'drag' && pp.size === 1) {
     // chạm sát một chấm rồi nhấc tay ngay (không kéo) là CHỌN ĐIỂM, chỉ khi kéo đủ xa mới là kéo chấm đi chỗ khác
     if (!pg.moved && Math.hypot(q.x - pg.x0, q.y - pg.y0) < 7) return;
-    pg.moved = true;
+    pg.moved = true; P.cursor = null;
     const ip = toImgP(q.x, q.y), h = pg.hit;
     if (h.arr) { h.arr[h.i] = ip; pRecalc(); } else if (h.obj) h.obj[h.k] = ip; else P.pending = ip;
   }
@@ -1437,6 +1468,7 @@ pc.addEventListener('pointermove', e => {
 function pEnd(e) {
   if (!pp.has(e.pointerId)) return;
   const q = pXY(e), g = pg; pp.delete(e.pointerId); clearTimeout(pLP);
+  if (e.pointerType !== 'mouse') P.cursor = null;       // cảm ứng: nhấc tay thì bỏ đường gióng (chuột thì giữ để theo con trỏ)
   if (pp.size === 0) { pg = null; if (g && (g.type === 'pan' || g.type === 'drag') && !g.moved && !g.done && e.type === 'pointerup') pTap(q.x, q.y); }
   else if (g && g.type === 'pinch') pg = null;
 }
@@ -1473,7 +1505,7 @@ $('pFile').addEventListener('change', async e => {
   const f = e.target.files[0]; if (!f) return;
   try {
     P.img = await createImageBitmap(f);
-    P.dims = []; P.calPts = []; P.calMode = null; P.cal = null; P.map = null; P.pending = null;
+    P.dims = []; P.calPts = []; P.calMode = null; P.cal = null; P.map = null; P.pending = null; P.draft = null; P.cursor = null;
     pFit(); pDraw();
   } catch { $('pMsg').textContent = 'Không đọc được ảnh này. Hãy thử ảnh JPG hoặc PNG.'; }
   e.target.value = '';
