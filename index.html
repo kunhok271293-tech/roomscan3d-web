@@ -1244,18 +1244,45 @@ function drawNotes(x, tf, s, live, bounds) {
   const items = P.dims.map(d => {
     const A = S(d.a), B = S(d.b), txt = dimText(d), w = x.measureText(txt).width + 14 * s, h = 24 * s;
     const L = Math.hypot(B.x - A.x, B.y - A.y) || 1, tx = (B.x - A.x) / L, ty = (B.y - A.y) / L;
-    return { d, A, B, txt, w, h, m: { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 }, tx, ty, nx: -ty, ny: tx };
+    let nx = -ty, ny = tx;
+    if (Math.abs(ny) >= 0.25 ? ny > 0 : nx < 0) { nx = -nx; ny = -ny; }       // phía ưu tiên đặt nhãn: lên trên; đoạn gần thẳng đứng thì sang phải
+    const mid = { x: (A.x + B.x) / 2, y: (A.y + B.y) / 2 };
+    // Đoạn ngắn hơn nhãn (ví dụ đo ổ điện): vẽ kiểu bản vẽ kỹ thuật, nhãn nằm ngoài vật, có hai đường gióng từ hai đầu đoạn
+    // ra đường dim để biết số đo thuộc về đoạn nào. Đoạn dài thì nhãn nằm ngay trên đường dim như thường.
+    // Độ lệch tỉ lệ với độ dài đoạn (vật càng to càng phải lệch xa) để nhãn không đè lên chính vật được đo.
+    const off = L < w + 20 * s, off1 = off ? Math.min(Math.max(L * 0.9, 14 * s), 56 * s) : 0;
+    const m = off ? { x: mid.x + nx * (off1 + h / 2 + 6 * s), y: mid.y + ny * (off1 + h / 2 + 6 * s) } : mid;
+    return { d, A, B, txt, w, h, m, mid, tx, ty, nx, ny, off, off1 };
   });
-  for (const it of items) {
-    x.strokeStyle = '#ff1f1f'; x.lineWidth = 2 * s; x.beginPath(); x.moveTo(it.A.x, it.A.y); x.lineTo(it.B.x, it.B.y); x.stroke();
-    dot(x, it.A, 4.5 * s, '#ff1f1f'); dot(x, it.B, 4.5 * s, '#ff1f1f');
-  }
   const rects = layoutLabels(items, s, bounds);
   items.forEach((it, i) => {
+    const { A, B } = it;
+    if (!it.off) {
+      x.strokeStyle = '#ff1f1f'; x.lineWidth = 2 * s; x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke();
+      dot(x, A, 3.5 * s, '#ff1f1f'); dot(x, B, 3.5 * s, '#ff1f1f');
+      return;
+    }
+    const r = rects[i], side = ((r.x + r.w / 2 - it.mid.x) * it.nx + (r.y + r.h / 2 - it.mid.y) * it.ny) >= 0 ? 1 : -1;
+    const o = it.off1 * side, e = (it.off1 + 5 * s) * side, g = 3 * s * side;       // độ lệch đường dim, độ vươn của đường gióng, khe hở sát vật
+    const P2 = (p, k) => ({ x: p.x + it.nx * k, y: p.y + it.ny * k });
+    const A2 = P2(A, o), B2 = P2(B, o), tk = 4.5 * s;
+    x.strokeStyle = 'rgba(255,60,60,.9)'; x.lineWidth = 1.6 * s;                    // đoạn thật được đo (mảnh, để thấy rõ vật bên dưới)
+    x.beginPath(); x.moveTo(A.x, A.y); x.lineTo(B.x, B.y); x.stroke();
+    x.lineWidth = 1.2 * s; x.beginPath();                                           // hai đường gióng
+    x.moveTo(P2(A, g).x, P2(A, g).y); x.lineTo(P2(A, e).x, P2(A, e).y);
+    x.moveTo(P2(B, g).x, P2(B, g).y); x.lineTo(P2(B, e).x, P2(B, e).y); x.stroke();
+    x.lineWidth = 2 * s; x.beginPath(); x.moveTo(A2.x, A2.y); x.lineTo(B2.x, B2.y);  // đường dim
+    for (const q of [A2, B2]) { x.moveTo(q.x - (it.tx + it.nx) * tk, q.y - (it.ty + it.ny) * tk); x.lineTo(q.x + (it.tx + it.nx) * tk, q.y + (it.ty + it.ny) * tk); }   // dấu gạch xiên hai đầu
+    x.stroke();
+    dot(x, A, 3 * s, '#ff1f1f'); dot(x, B, 3 * s, '#ff1f1f');
+    it.ref = P2(it.mid, o);
+  });
+  items.forEach((it, i) => {
     const r = rects[i], col = it.d.real != null ? '#ff5a4d' : '#aab0b6';
-    if (Math.hypot(r.x + r.w / 2 - it.m.x, r.y + r.h / 2 - it.m.y) > 2 * s) {      // nhãn bị đẩy ra xa: vạch nối về đường dim
-      x.strokeStyle = col; x.lineWidth = 1 * s; x.beginPath(); x.moveTo(it.m.x, it.m.y); x.lineTo(r.x + r.w / 2, r.y + r.h / 2); x.stroke();
-      dot(x, it.m, 2.5 * s, col);
+    const ref = it.off && it.ref ? it.ref : it.mid;
+    if (Math.hypot(r.x + r.w / 2 - ref.x, r.y + r.h / 2 - ref.y) > (it.off ? it.h / 2 + 9 * s : 2 * s)) {   // nhãn bị đẩy ra xa: vạch nối về đường dim
+      x.strokeStyle = col; x.lineWidth = 1 * s; x.beginPath(); x.moveTo(ref.x, ref.y); x.lineTo(r.x + r.w / 2, r.y + r.h / 2); x.stroke();
+      dot(x, ref, 2.5 * s, col);
     }
     x.fillStyle = 'rgba(20,20,20,.92)'; x.fillRect(r.x, r.y, r.w, r.h);
     x.strokeStyle = col; x.lineWidth = 1.2 * s; x.strokeRect(r.x, r.y, r.w, r.h);
@@ -1307,12 +1334,16 @@ function layoutLabels(items, s, bounds) {
   const overlap = (a, b) => a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
   const hasPt = (r, p) => p.x >= r.x - pad && p.x <= r.x + r.w + pad && p.y >= r.y - pad && p.y <= r.y + r.h + pad;
   return items.map((it, idx) => {
-    const cands = [{ dx: 0, dy: 0 }];
+    const cands = [{ dx: 0, dy: 0, k: 0 }];
+    if (it.off) {                         // đoạn ngắn: thử luôn phía đối diện của vật (đối xứng qua đoạn đo)
+      const mx = -2 * (it.m.x - it.mid.x), my = -2 * (it.m.y - it.mid.y);
+      cands.push({ dx: mx, dy: my, k: Math.hypot(mx, my) * 0.7 });
+    }
     for (let k = 1; k <= 14; k++) {
       const pp = k * (it.h + 4 * s), aa = k * it.w * 0.55;
-      for (const [u, v] of dirs) cands.push({ dx: it.nx * u * pp + it.tx * v * aa, dy: it.ny * u * pp + it.ty * v * aa });
+      for (const [u, v] of dirs) { const dx = it.nx * u * pp + it.tx * v * aa, dy = it.ny * u * pp + it.ty * v * aa; cands.push({ dx, dy, k: Math.hypot(dx, dy) }); }
     }
-    cands.sort((p, q) => Math.hypot(p.dx, p.dy) - Math.hypot(q.dx, q.dy));
+    cands.sort((p, q) => p.k - q.k);
     let best = null, bs = Infinity;
     for (const c of cands) {
       const r = { x: it.m.x + c.dx - it.w / 2, y: it.m.y + c.dy - it.h / 2, w: it.w, h: it.h };
@@ -1323,7 +1354,7 @@ function layoutLabels(items, s, bounds) {
       let conflicts = 0;
       for (const p of placed) if (overlap(r, p)) conflicts += 100;
       items.forEach((o, j) => {
-        if (j === idx) return;
+        if (j === idx && !it.off) return;                  // nhãn nằm trên chính đường dim của nó thì được; đoạn ngắn thì nhãn không được che vật đo
         if (segHitsRect(o.A, o.B, r, pad)) conflicts += 10;
         if (hasPt(r, o.A) || hasPt(r, o.B)) conflicts += 5;
       });
