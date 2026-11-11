@@ -197,6 +197,7 @@
     <label class="btn">🖼 Mở ảnh<input id="pFile" type="file" accept="image/*" hidden></label>
     <button id="pCal">① Chuẩn tỉ lệ</button>
     <button id="pFitBtn" title="Về lại tỉ lệ ban đầu: hiện cả ảnh vừa khung">⤢ Vừa khung</button>
+    <button id="pRelayout" title="Xếp lại tất cả số đo về vị trí tự động (bỏ các chỗ đã kéo)">↺ Xếp nhãn</button>
     <button id="pUnit">cm ⇅</button>
     <button id="pUndo">↶</button>
     <button id="pSave">Lưu ảnh</button>
@@ -1209,7 +1210,7 @@ function pMsgUpdate() {
   else if (P.calMode === 'line') t = `Chuẩn tỉ lệ: chạm 2 đầu của đoạn đã biết chiều dài (${P.calPts.length}/2).`;
   else if (P.calMode === 'rect') t = `Chuẩn tỉ lệ: chạm 4 góc theo thứ tự trái-trên, phải-trên, phải-dưới, trái-dưới (${P.calPts.length}/4).`;
   else if (P.pending) t = 'Chạm điểm thứ hai.';
-  else if (P.map) t = 'Đã chuẩn tỉ lệ. Chạm 2 điểm để đo; chạm giữ vào số đo để sửa; kéo chấm để chỉnh; hai ngón để zoom; ⤢ để về lại cả ảnh.';
+  else if (P.map) t = 'Đã chuẩn tỉ lệ. Chạm 2 điểm để đo; chạm giữ vào số đo để sửa; kéo số đo để dời; kéo chấm để chỉnh; hai ngón để zoom; ⤢ để về lại cả ảnh.';
   else t = 'Chưa chuẩn tỉ lệ: bấm ① để chuẩn, hoặc cứ đo rồi nhập số thật cho từng đoạn. Chạm giữ vào số đo để sửa.';
   $('pMsg').textContent = t;
 }
@@ -1252,7 +1253,7 @@ function drawNotes(x, tf, s, live, bounds) {
     // Độ lệch tỉ lệ với độ dài đoạn (vật càng to càng phải lệch xa) để nhãn không đè lên chính vật được đo.
     const off = L < w + 20 * s, off1 = off ? Math.min(Math.max(L * 0.9, 14 * s), 56 * s) : 0;
     const m = off ? { x: mid.x + nx * (off1 + h / 2 + 6 * s), y: mid.y + ny * (off1 + h / 2 + 6 * s) } : mid;
-    return { d, A, B, txt, w, h, m, mid, tx, ty, nx, ny, off, off1 };
+    return { d, A, B, txt, w, h, m, mid, tx, ty, nx, ny, off, off1, lp: d.lp ? S(d.lp) : null };   // lp: vị trí nhãn do người dùng kéo
   });
   const rects = layoutLabels(items, s, bounds);
   items.forEach((it, i) => {
@@ -1262,8 +1263,10 @@ function drawNotes(x, tf, s, live, bounds) {
       dot(x, A, 3.5 * s, '#ff1f1f'); dot(x, B, 3.5 * s, '#ff1f1f');
       return;
     }
-    const r = rects[i], side = ((r.x + r.w / 2 - it.mid.x) * it.nx + (r.y + r.h / 2 - it.mid.y) * it.ny) >= 0 ? 1 : -1;
-    const o = it.off1 * side, e = (it.off1 + 5 * s) * side, g = 3 * s * side;       // độ lệch đường dim, độ vươn của đường gióng, khe hở sát vật
+    const r = rects[i], u = (r.x + r.w / 2 - it.mid.x) * it.nx + (r.y + r.h / 2 - it.mid.y) * it.ny, side = u >= 0 ? 1 : -1;
+    // người dùng kéo nhãn đi đâu thì đường dim đi theo, nằm sát phía trong nhãn; tự xếp thì dùng độ lệch mặc định
+    const off1 = it.lp ? Math.max(6 * s, Math.abs(u) - it.h / 2 - 6 * s) : it.off1;
+    const o = off1 * side, e = (off1 + 5 * s) * side, g = 3 * s * side;       // độ lệch đường dim, độ vươn của đường gióng, khe hở sát vật
     const P2 = (p, k) => ({ x: p.x + it.nx * k, y: p.y + it.ny * k });
     const A2 = P2(A, o), B2 = P2(B, o), tk = 4.5 * s;
     x.strokeStyle = 'rgba(255,60,60,.9)'; x.lineWidth = 1.6 * s;                    // đoạn thật được đo (mảnh, để thấy rõ vật bên dưới)
@@ -1333,7 +1336,11 @@ function layoutLabels(items, s, bounds) {
   const placed = [], pad = 3 * s, dirs = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
   const overlap = (a, b) => a.x < b.x + b.w + pad && b.x < a.x + a.w + pad && a.y < b.y + b.h + pad && b.y < a.y + a.h + pad;
   const hasPt = (r, p) => p.x >= r.x - pad && p.x <= r.x + r.w + pad && p.y >= r.y - pad && p.y <= r.y + r.h + pad;
+  // nhãn người dùng đã kéo thì giữ nguyên chỗ đó, các nhãn khác tự tránh nó
+  const fixed = items.map(it => it.lp ? { x: it.lp.x - it.w / 2, y: it.lp.y - it.h / 2, w: it.w, h: it.h } : null);
+  fixed.forEach(r => { if (r) placed.push(r); });
   return items.map((it, idx) => {
+    if (fixed[idx]) return fixed[idx];
     const cands = [{ dx: 0, dy: 0, k: 0 }];
     if (it.off) {                         // đoạn ngắn: thử luôn phía đối diện của vật (đối xứng qua đoạn đo)
       const mx = -2 * (it.m.x - it.mid.x), my = -2 * (it.m.y - it.mid.y);
@@ -1491,8 +1498,10 @@ pc.addEventListener('pointerdown', e => {
     const [a, b] = [...pp.values()], d = Math.hypot(a.x - b.x, a.y - b.y) || 1, cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
     pg = { type: 'pinch', d0: d, s0: P.scale, ip: toImgP(cx, cy) };
   } else if (pp.size === 1) {
-    const hit = pHit(q.x, q.y);
-    pg = hit ? { type: 'drag', hit, x0: q.x, y0: q.y } : { type: 'pan', x0: q.x, y0: q.y, ox0: P.ox, oy0: P.oy, moved: false };
+    const hit = pHit(q.x, q.y), lab = hit ? null : pLabelAt(q.x, q.y);
+    pg = hit ? { type: 'drag', hit, x0: q.x, y0: q.y }
+      : lab ? { type: 'label', d: lab, x0: q.x, y0: q.y, off: { x: lab.lab.x + lab.lab.w / 2 - q.x, y: lab.lab.y + lab.lab.h / 2 - q.y }, moved: false }   // kéo số đo đi chỗ khác
+      : { type: 'pan', x0: q.x, y0: q.y, ox0: P.ox, oy0: P.oy, moved: false };
     // giữ yên ~0,5 giây trên một nhãn số đo thì mở hộp sửa số đo
     if (P.pending || P.calMode) { P.cursor = pSnapImg(q.x, q.y); pDraw(); }     // đang chờ điểm tiếp theo: hiện đường gióng tới chỗ chạm
     clearTimeout(pLP);
@@ -1518,6 +1527,10 @@ pc.addEventListener('pointermove', e => {
   } else if (pg.type === 'pan' && pp.size === 1) {
     if (Math.hypot(q.x - pg.x0, q.y - pg.y0) > 8) pg.moved = true;
     if (pg.moved) { P.cursor = null; P.ox = pg.ox0 + q.x - pg.x0; P.oy = pg.oy0 + q.y - pg.y0; }
+  } else if (pg.type === 'label' && pp.size === 1) {
+    if (!pg.moved && Math.hypot(q.x - pg.x0, q.y - pg.y0) < 7) return;
+    pg.moved = true; P.cursor = null;
+    pg.d.lp = toImgP(q.x + pg.off.x, q.y + pg.off.y);      // nhãn theo ngón tay (giữ nguyên chỗ đã nắm), đường dim đi theo
   } else if (pg.type === 'drag' && pp.size === 1) {
     // chạm sát một chấm rồi nhấc tay ngay (không kéo) là CHỌN ĐIỂM, chỉ khi kéo đủ xa mới là kéo chấm đi chỗ khác
     if (!pg.moved && Math.hypot(q.x - pg.x0, q.y - pg.y0) < 7) return;
@@ -1531,7 +1544,7 @@ function pEnd(e) {
   if (!pp.has(e.pointerId)) return;
   const q = pXY(e), g = pg; pp.delete(e.pointerId); clearTimeout(pLP);
   if (e.pointerType !== 'mouse') P.cursor = null;       // cảm ứng: nhấc tay thì bỏ đường gióng (chuột thì giữ để theo con trỏ)
-  if (pp.size === 0) { pg = null; if (g && (g.type === 'pan' || g.type === 'drag') && !g.moved && !g.done && e.type === 'pointerup') pTap(q.x, q.y); }
+  if (pp.size === 0) { pg = null; if (g && (g.type === 'pan' || g.type === 'drag' || g.type === 'label') && !g.moved && !g.done && e.type === 'pointerup') pTap(q.x, q.y); }
   else if (g && g.type === 'pinch') pg = null;
 }
 pc.addEventListener('pointerup', pEnd);
@@ -1578,6 +1591,7 @@ function pStartCal(mode) { $('pCalPick').style.display = 'none'; P.calMode = mod
 $('pcLine').onclick = () => pStartCal('line');
 $('pcRect').onclick = () => pStartCal('rect');
 $('pFitBtn').onclick = () => { pFit(); pDraw(); };
+$('pRelayout').onclick = () => { P.dims.forEach(d => { d.lp = null; }); pDraw(); };
 $('pUnit').onclick = () => setUnit({ cm: 'mm', mm: 'm', m: 'cm' }[unit]);
 $('pUndo').onclick = () => {
   if (P.pending) P.pending = null;
@@ -1647,7 +1661,7 @@ async function savePhotoToApp(name, blob) {
   try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {}
   const pt = p => ({ x: p.x, y: p.y });
   await libAdd({ name, ts: Date.now(), png: blob, src: P.file || null, w: P.img.width, h: P.img.height, unit,
-    dims: P.dims.map(d => ({ a: pt(d.a), b: pt(d.b), real: d.real })), calPts: P.calPts.map(pt), cal: P.cal ? { ...P.cal } : null });
+    dims: P.dims.map(d => ({ a: pt(d.a), b: pt(d.b), real: d.real, lp: d.lp ? pt(d.lp) : null })), calPts: P.calPts.map(pt), cal: P.cal ? { ...P.cal } : null });
 }
 async function doSavePhoto(where) {
   if (!pSaveCtx) return;
@@ -1698,7 +1712,7 @@ async function reopenPhoto(rec) {
   if (!rec.src) { $('pMsg').textContent = 'Ảnh này không có bản gốc để sửa tiếp (chỉ có ảnh đã ghi số đo).'; return; }
   try {
     P.img = await createImageBitmap(rec.src); P.file = rec.src;
-    P.dims = (rec.dims || []).map(d => ({ a: { ...d.a }, b: { ...d.b }, real: d.real }));
+    P.dims = (rec.dims || []).map(d => ({ a: { ...d.a }, b: { ...d.b }, real: d.real, lp: d.lp ? { ...d.lp } : null }));
     P.calPts = (rec.calPts || []).map(p => ({ ...p })); P.cal = rec.cal ? { ...rec.cal } : null;
     P.calMode = null; P.pending = null; P.draft = null; P.cursor = null; P.map = null;
     pRecalc(); if (rec.unit) setUnit(rec.unit);
